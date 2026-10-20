@@ -17,11 +17,13 @@ behavior that ships:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
 from homeassistant.components.climate import HVACAction, HVACMode
+from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
@@ -327,6 +329,50 @@ async def test_returned_but_not_seen_off_is_not_landed(hass: HomeAssistant) -> N
     assert _s(hass, head_b) == "heat"
     await _recompute(hass, entry)
     assert (_s(hass, head_b), calls["n"]) == ("off", 2)
+
+
+async def test_off_seen_while_our_run_is_in_flight_is_not_landed(
+    hass: HomeAssistant,
+) -> None:
+    """Our cool is still in flight when the room is disabled and the head
+    reports off: that cool can still turn it back on, so the park has not
+    landed. Our off follows it and the room is released only once that lands."""
+    entry, _a, head_b = await _setup(hass, hands_off=(False, True))
+    head = _head(hass, head_b)
+    real = head.async_set_temperature
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(**kwargs):
+        if kwargs.get("hvac_mode") == "cool":
+            entered.set()
+            await release.wait()
+        await real(**kwargs)
+
+    head.async_set_temperature = slow
+    # The enabled secondary needs cool. (No block_till_done while the cool is
+    # paused: it would wait on it.)
+    hass.states.async_set(SENSOR_B, "76", {ATTR_UNIT_OF_MEASUREMENT: "°F"})
+    task = hass.async_create_task(entry.runtime_data.async_refresh())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await hass.services.async_call(
+            "switch", "turn_off",
+            {"entity_id": _eid(hass, entry, "_secondary_enable")}, blocking=True,
+        )
+        head._attr_hvac_mode = "off"  # a person's remote, or a stray report
+        head.async_write_ha_state()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert _s(hass, head_b) == "off"
+        assert entry.runtime_data.hands_off_released("secondary") is False
+    finally:
+        release.set()
+        await task
+    await hass.async_block_till_done()
+    await _recompute(hass, entry)
+    assert _s(hass, head_b) == "off"
+    zone = _plan(hass, entry).attributes["zones"][1]
+    assert zone["hands_off"] == "released"
 
 
 async def test_restart_keeps_the_hold(hass: HomeAssistant) -> None:
