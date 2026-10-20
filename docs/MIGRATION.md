@@ -1,6 +1,6 @@
 # Upgrading and migrating MXZ Coordinator
 
-## Hands-off when disabled (in progress, not yet released)
+## Hands-off when disabled (3.6.0)
 
 A per-room setting, **Hands-off when disabled**, in Configure → Rooms → (room). It is
 stored as `hands_off: true` in that room's record in the entry's `zones` list, and only

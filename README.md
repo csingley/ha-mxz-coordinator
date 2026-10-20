@@ -63,7 +63,7 @@ Use [Reconfigure](#reconfigure-heads-rooms-and-sensors) to change the room list 
 
 - [What it does](#what-it-does), and
   [the problem it solves](#the-problem-stock-auto-starves-rooms)
-- [What's new in 3.5.0](#whats-new-in-350)
+- [What's new in 3.6.0](#whats-new-in-360)
 - [Before you install](#before-you-install) · [Install](#install)
 - [Set up your outdoor unit](#set-up-your-outdoor-unit) ·
   [If setup stops or warns](#if-setup-stops-or-warns)
@@ -149,22 +149,28 @@ supported hardware and setup apply. It is not tested for parity with this integr
 
 </details>
 
-## What's new in 3.5.0
+## What's new in 3.6.0
 
-- **New setups dry the coil, then turn off.** **When a room reaches target** now
-  defaults to `off_after_dry`: after cooling, a satisfied head runs its fan for the
-  coil-dry time and is then asked to turn off; after heating it is asked to turn off at
-  once. See [How a satisfied head idles](#how-a-satisfied-head-idles).
-- **Upgrading changes nothing.** An existing entry that never chose an idle action was
-  running `fan_only`; the upgrade stores `fan_only` for it, and a saved choice is kept.
-  To switch, choose **Off after drying** in Configure → Fan and idle. See
-  [Idle action default](docs/MIGRATION.md#idle-action-default-350).
-- **FAQ and troubleshooting.** Short answers to things people have asked about or
-  tripped over, each linked to its detail. See
-  [FAQ and troubleshooting](#faq-and-troubleshooting).
-- **Stock AUTO, as the Mitsubishi manuals describe it.** When heads want opposite
-  modes, the head selected last waits in standby. On some outdoor units an installer
-  switch, off by default, lets the lowest-address head choose the mode for all. See
+- **Run one room from its own remote.** A new per-room setting, **Hands-off when
+  disabled**, in Configure → Rooms → (room). With it on, disabling that room sends
+  `off` until the head reports `off`, then leaves the head to its own remote, timer or
+  app, across a restart too. The room tile shows what the head is really doing, and its
+  heat or cool counts in the shared direction below every enabled room. Built from
+  [@csingley](https://github.com/csingley)'s
+  [#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27) and
+  [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28). See
+  [Run one room from its own remote](#run-one-room-from-its-own-remote).
+- **Upgrading changes nothing.** The setting is off for every room, including every room
+  of an existing install, so a disabled room is held off exactly as before until you
+  turn it on. There is no migration. See
+  [Hands-off when disabled](docs/MIGRATION.md#hands-off-when-disabled-360).
+
+From 3.5.0:
+
+- **New setups dry the coil, then turn off** (`off_after_dry`); an upgraded entry keeps
+  `fan_only`. See [Idle action default](docs/MIGRATION.md#idle-action-default-350).
+- **FAQ and troubleshooting**, and **stock AUTO as the Mitsubishi manuals describe it**.
+  See [FAQ and troubleshooting](#faq-and-troubleshooting) and
   [the problem it solves](#the-problem-stock-auto-starves-rooms).
 
 From 3.4.1 and 3.4.2:
@@ -1206,7 +1212,7 @@ MXZ Coordinator got this good because people ran it on their own systems, found 
 - [@helicopterrun](https://github.com/helicopterrun) validated it on 3-zone hardware and did relentless, root-caused QA through the v3 beta ([#4](https://github.com/dkpnw/ha-mxz-coordinator/issues/4), [#5](https://github.com/dkpnw/ha-mxz-coordinator/issues/5), [#6](https://github.com/dkpnw/ha-mxz-coordinator/issues/6), [#7](https://github.com/dkpnw/ha-mxz-coordinator/issues/7)). Those reports led to the removal docs, single-setpoint head support and entry-scoped restore.
 - [@oliverbrandmueller](https://github.com/oliverbrandmueller) asked for metric units ([#2](https://github.com/dkpnw/ha-mxz-coordinator/issues/2)). Since 2.8.0 the coordinator runs in your Home Assistant temperature unit from end to end.
 - **mw1029** on the [Home Assistant forum](https://community.home-assistant.io/t/1018382) tried MXZ with the cloud-based `comfort_HA` integration and posted both entity dumps, which showed exactly where the two don't line up. Support for it is in progress.
-- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Hands-off when disabled** setting is built from both, with him as co-author. It is in progress and not yet in a release.
+- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Hands-off when disabled** setting is built from both, with him as co-author. It is set for 3.6.0, which is not released yet.
 
 **Prior art and references**
 
