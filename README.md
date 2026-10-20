@@ -167,9 +167,10 @@ supported hardware and setup apply. It is not tested for parity with this integr
   [Run one room from its own remote (3.6.0)](docs/MIGRATION.md#run-one-room-from-its-own-remote-360).
 - **Hardware-tested by [@csingley](https://github.com/csingley)** on a 4-zone
   MXZ-4C36NA2: park on disable, own-remote control, a vote never outranks a real
-  demand, and a vote's flip starts no mode-change wait. The setting's label and the
-  plan's `mode_by_hands_off` attribute came from his feedback. Apple Home was not
-  tested on hardware.
+  demand (true for an ordinary vote; see [Safety priority](#safety-priority) for the
+  one exception added since), and a vote's flip starts no mode-change wait. The
+  setting's label and the plan's `mode_by_hands_off` attribute came from his
+  feedback. Apple Home was not tested on hardware.
 
 From 3.5.0:
 
@@ -734,19 +735,41 @@ With it on, when you disable that room (its switch, or its tile set to `off`):
   drying from its mode. In Apple Home that is the current state; the target, and so
   most likely the tile's label, stays Off.
 - If the head runs `heat` or `cool`, that counts in the shared direction, below every
-  enabled room. It decides the direction only when no enabled room is calling or still
-  running to its target, and a direction change it causes alone does not start the
-  mode-change wait, so an enabled room that then calls the other way is not held back
-  by it. Once an enabled room runs in the direction it chose, the wait starts, just as
-  if that room had chosen it. `sensor.*_plan` shows the head's vote in that room's
-  `hands_off_vote` (its `hands_off` reads `parking` or `released`), and `standoff` is
-  true when it and another room want opposite modes. The plan's top-level
-  `mode_by_hands_off` is true when the vote, not an enabled room, set the shared mode
-  on that update: no enabled room is calling and the vote picks a mode the enabled
-  rooms alone would not, or the mode goes back after the vote ends. Such a change
-  starts no mode-change wait. With **Resting mode** set to Cool or Heat it stays true
-  while the vote holds the mode away from rest; on Last used it is true only on the
-  update that makes the change. With no room opted in it is always false.
+  enabled room **unless this room is also marked a safety priority** (see below) — in
+  that case it outranks every enabled room instead. Ordinarily it decides the
+  direction only when no enabled room is calling or still running to its target, and a
+  direction change it causes alone does not start the mode-change wait, so an enabled
+  room that then calls the other way is not held back by it. Once an enabled room runs
+  in the direction it chose, the wait starts, just as if that room had chosen it.
+  `sensor.*_plan` shows the head's vote in that room's `hands_off_vote` (its
+  `hands_off` reads `parking` or `released`), and `standoff` is true when it and
+  another room want opposite modes. The plan's top-level `mode_by_hands_off` is true
+  when the vote, not an enabled room, set the shared mode on that update: no enabled
+  room is calling and the vote picks a mode the enabled rooms alone would not, or the
+  mode goes back after the vote ends. Such a change starts no mode-change wait. With
+  **Resting mode** set to Cool or Heat it stays true while the vote holds the mode
+  away from rest; on Last used it is true only on the update that makes the change.
+  With no room opted in it is always false. **This does not apply when the vote is
+  overriding an enabled room's own ACTIVE run under a safety priority** — that
+  reversal starts the mode-change wait exactly like an enabled room's own flip (see
+  below), so a safety sensor that flaps on and off cannot reverse the compressor twice
+  inside one wait.
+
+### Safety priority
+
+Any room — enabled or hands-off — can be marked **Safety priority** in Configure →
+Rooms → (room): an optional binary sensor reference. While that sensor reads `on`,
+this room's want for heat or cool outranks every other room's, coordinated or
+hands-off, regardless of configured room priority. It is for a real floor/ceiling
+condition (a freeze or overheat risk), not an everyday comfort preference — overusing
+it defeats the point of having a priority order at all.
+
+Unset by default: no behavior change for any room until you wire one. A safety room
+preempting an enabled room's ACTIVE run starts the mode-change wait, same as any
+other real reversal; a safety room deciding into otherwise-idle silence does not,
+same as an ordinary hands-off vote. `sensor.*_plan` shows a room's assertion in
+`safety_priority`, and the plan's top-level `mode_by_safety` is true when a safety
+room's want set the shared mode on that update.
 - A standby hold still holds this head too: at the hold's park mode, or `off` under
   an `eco` hold, for as long as the hold lasts. Afterwards the head is left alone
   again. MXZ does not "heal" this head out of `dry` or `auto`.
@@ -908,6 +931,7 @@ refer to priority slots, not permanent room identities.
 | --- | --- |
 | `standoff`, demand/engage, mode dwell | Another room's priority or dwell may be holding the direction. Check targets and priority before changing a raw head. |
 | `mode_by_hands_off`, room `hands_off_vote` | True when a disabled room run from its own remote set the shared mode, with no enabled room calling; that change starts no mode-change wait. Always false with no room opted in. See [Run one room from its own remote](#run-one-room-from-its-own-remote). |
+| `mode_by_safety`, room `safety_priority` | True when a room marked Safety priority set the shared mode. Preempting an enabled room's active run starts the mode-change wait like any real reversal; deciding into idle silence does not. See [Safety priority](#safety-priority). |
 | `inhibited`, room enable, lockouts, eco | A configured gate may be parking the room. Check the controlling switch/input. |
 | `sensor_health`, `sensor_age`, `sensors_ok` | Check validity and the freshness contract. Age of an HA write can differ from age of a sample. |
 | `fan_hold`, `control_reasons` | Check ownership, capability, restore and settings warnings with their suggested next step. |
@@ -1014,6 +1038,18 @@ off once, retrying until the head reports `off`. Then MXZ leaves it alone until 
 enable the room again, across restarts too. With the setting off (the default), a
 disabled room's head is held off, and MXZ turns it back off whenever someone turns it on.
 See [Run one room from its own remote](#run-one-room-from-its-own-remote).
+
+</details>
+
+<details>
+<summary><b>One room needs to win every time, not just by priority order</b></summary>
+
+Wire a `binary_sensor` to that room's **Safety priority** field in Configure → Rooms.
+While it reads `on`, that room's want for heat or cool outranks every other room's,
+coordinated or hands-off — including an enabled room's own active run, which is the
+one case an ordinary hands-off vote can never win. Reserve it for a real
+freeze/overheat floor or ceiling, not everyday comfort: it is an override, not a
+priority bump. See [Safety priority](#safety-priority).
 
 </details>
 
