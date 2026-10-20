@@ -22,13 +22,17 @@ def violations(workflow):
     if workflow.get("permissions") != {"contents": "read"}:
         errors.append("token permissions")
     jobs = workflow.get("jobs", {})
-    if set(jobs) != {"hassfest", "hacs", "ruff", "pytest", "yamllint", "issue25"}:
+    if set(jobs) != {"approval", "hassfest", "hacs", "ruff", "pytest", "yamllint", "issue25"}:
         errors.append("missing or extra job")
-    for job in jobs.values():
+    for name, job in jobs.items():
         if job.get("runs-on") != "ubuntu-24.04" or "environment" in job:
             errors.append("runner/environment boundary")
-        if "permissions" in job or "secrets" in job:
+        # The approval admission alone may read Actions run metadata, nothing more.
+        allowed = {"contents": "read", "actions": "read"} if name == "approval" else None
+        if job.get("permissions", None) != allowed or "secrets" in job:
             errors.append("job credential override")
+        if name != "approval" and job.get("needs") != "approval":
+            errors.append("approval dependency")
         for step in job.get("steps", []):
             if "ulimit -f" in step.get("run", ""):
                 errors.append("process-wide file limit for log")
@@ -90,13 +94,18 @@ def test_installer_and_tests_do_not_inherit_log_file_limits(workflow):
         assert "ulimit -f" not in (Path(__file__).parents[1] / path).read_text()
 
 
-def admitted(expression, context):
-    """Evaluate the authored Boolean subset, with no provider call."""
+def admitted(expression, context, approval=""):
+    """Evaluate the authored Boolean subset, with no provider call.
+
+    ``approval`` is the approval job's ``admitted`` output: "" when it was skipped.
+    """
     expression = expression.removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("&&", " and ").replace("||", " or ")
     expression = re.sub(r"!(?!=)", " not ", expression)
     return bool(eval(expression.strip(), {"__builtins__": {}}, {
         "github": SimpleNamespace(**context), "startsWith": lambda value, prefix: value.startswith(prefix),
+        "needs": SimpleNamespace(approval=SimpleNamespace(outputs=SimpleNamespace(admitted=approval))),
+        "cancelled": lambda: False,
     }))
 
 
@@ -130,7 +139,8 @@ GATE_CASES = [
                          ids=[row[0] for row in GATE_CASES])
 def test_actual_job_gates(workflow, case, event, ref, head, base, attempt, ordinary):
     context = {"event_name": event, "ref": ref, "head_ref": head, "base_ref": base, "run_attempt": attempt}
-    selected = {name for name, job in workflow["jobs"].items() if admitted(job["if"], context)}
+    selected = {name for name, job in workflow["jobs"].items()
+                if name != "approval" and admitted(job["if"], context)}
     assert selected == ({"hassfest", "hacs", "ruff", "pytest", "yamllint"} if ordinary else {"issue25"})
     assert workflow["on"]["push"] == {"branches": ["**"]}
     guard = workflow["jobs"]["issue25"]["steps"][0]["run"]
@@ -569,7 +579,7 @@ RECOVERY_ROUTES = [
 def test_recovery_route_actual_guards(workflow, case, event, ref, head, base, attempt, ordinary, reason):
     context = {'event_name': event, 'ref': ref, 'head_ref': head, 'base_ref': base, 'run_attempt': attempt}
     jobs = workflow['jobs']
-    selected = {name for name, job in jobs.items() if admitted(job['if'], context)}
+    selected = {name for name, job in jobs.items() if name != 'approval' and admitted(job['if'], context)}
     assert selected == ({'hassfest', 'hacs', 'ruff', 'pytest', 'yamllint'} if ordinary else {'issue25'})
     floor_steps = jobs['pytest']['steps']
     for step in floor_steps:

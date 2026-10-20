@@ -3,7 +3,7 @@
 set -euo pipefail
 mode=${1:?setup, checks, sentinel, suite or export required}
 [[ ${GITHUB_RUN_ID:-} =~ ^[0-9]+$ ]]
-test "${GITHUB_RUN_ATTEMPT:-}" = 1
+test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; }
 [[ ${GITHUB_SHA:-} =~ ^[0-9a-f]{40}$ ]]
 test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 git diff --exit-code HEAD -- .

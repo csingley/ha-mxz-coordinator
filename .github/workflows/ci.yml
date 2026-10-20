@@ -12,8 +12,35 @@ permissions:
   contents: read
 
 jobs:
+  approval:
+    name: first-time contributor approval admission
+    # GitHub runs an approved first-time-contributor PR run as attempt 2; attempt 1
+    # is a zero-job placeholder held at action_required. Admit exactly that shape
+    # and nothing else: an ordinary re-run (attempt 1 executed jobs) stays refused.
+    if: ${{ github.run_attempt == 2 && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      admitted: ${{ steps.check.outputs.admitted }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Attempt 1 was only held for approval
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 tools/ci_approval_admission.py
+
   hassfest:
-    if: ${{ (github.run_attempt == 1 && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '') }}
+    needs: approval
+    env:
+      APPROVAL_ADMITTED: ${{ needs.approval.outputs.admitted }}
+    if: ${{ !cancelled() && (((github.run_attempt == 1 || github.run_attempt == 2 && github.event_name == 'pull_request' && needs.approval.outputs.admitted == 'true') && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '')) }}
     name: hassfest
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -26,7 +53,7 @@ jobs:
           test "${REPOSITORY_PRIVATE:-}" = false || refuse repository
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted || refuse runner
           test "${RUNNER_ARCH:-}" = X64 || refuse architecture
-          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || refuse attempt
+          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; } || refuse attempt
           [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || refuse source
       - uses: actions/checkout@v4
         with:
@@ -36,7 +63,10 @@ jobs:
       - uses: home-assistant/actions/hassfest@master
 
   hacs:
-    if: ${{ (github.run_attempt == 1 && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '') }}
+    needs: approval
+    env:
+      APPROVAL_ADMITTED: ${{ needs.approval.outputs.admitted }}
+    if: ${{ !cancelled() && (((github.run_attempt == 1 || github.run_attempt == 2 && github.event_name == 'pull_request' && needs.approval.outputs.admitted == 'true') && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '')) }}
     name: HACS
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -49,7 +79,7 @@ jobs:
           test "${REPOSITORY_PRIVATE:-}" = false || refuse repository
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted || refuse runner
           test "${RUNNER_ARCH:-}" = X64 || refuse architecture
-          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || refuse attempt
+          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; } || refuse attempt
           [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || refuse source
       - uses: actions/checkout@v4
         with:
@@ -63,7 +93,10 @@ jobs:
           # Brand icons ship locally; the brands check runs with no ignore.
 
   ruff:
-    if: ${{ (github.run_attempt == 1 && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '') }}
+    needs: approval
+    env:
+      APPROVAL_ADMITTED: ${{ needs.approval.outputs.admitted }}
+    if: ${{ !cancelled() && (((github.run_attempt == 1 || github.run_attempt == 2 && github.event_name == 'pull_request' && needs.approval.outputs.admitted == 'true') && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '')) }}
     name: ruff
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -76,7 +109,7 @@ jobs:
           test "${REPOSITORY_PRIVATE:-}" = false || refuse repository
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted || refuse runner
           test "${RUNNER_ARCH:-}" = X64 || refuse architecture
-          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || refuse attempt
+          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; } || refuse attempt
           [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || refuse source
       - uses: actions/checkout@v4
         with:
@@ -90,7 +123,10 @@ jobs:
       - run: ruff check custom_components/ tests/ tools/
 
   pytest:
-    if: ${{ (github.run_attempt == 1 && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '') }}
+    needs: approval
+    env:
+      APPROVAL_ADMITTED: ${{ needs.approval.outputs.admitted }}
+    if: ${{ !cancelled() && (((github.run_attempt == 1 || github.run_attempt == 2 && github.event_name == 'pull_request' && needs.approval.outputs.admitted == 'true') && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '')) }}
     name: pytest (${{ matrix.lane }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -119,7 +155,7 @@ jobs:
           test "${REPOSITORY_PRIVATE:-}" = false || refuse repository
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted || refuse runner
           test "${RUNNER_ARCH:-}" = X64 || refuse architecture
-          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || refuse attempt
+          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; } || refuse attempt
           [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || refuse source
       - uses: actions/checkout@v4
         with:
@@ -273,7 +309,10 @@ jobs:
           exit "$result"
 
   yamllint:
-    if: ${{ (github.run_attempt == 1 && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '') }}
+    needs: approval
+    env:
+      APPROVAL_ADMITTED: ${{ needs.approval.outputs.admitted }}
+    if: ${{ !cancelled() && (((github.run_attempt == 1 || github.run_attempt == 2 && github.event_name == 'pull_request' && needs.approval.outputs.admitted == 'true') && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '')) }}
     name: yamllint (legacy package)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -286,7 +325,7 @@ jobs:
           test "${REPOSITORY_PRIVATE:-}" = false || refuse repository
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted || refuse runner
           test "${RUNNER_ARCH:-}" = X64 || refuse architecture
-          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || refuse attempt
+          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; } || refuse attempt
           [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || refuse source
       - uses: actions/checkout@v4
         with:
@@ -297,9 +336,10 @@ jobs:
       - run: yamllint -c .yamllint packages/ examples/
 
   issue25:
+    needs: approval
     name: issue25 floor comparison or visible refusal
     # Invalid events/attempts get a failing guard, never an empty skipped run.
-    if: ${{ !((github.run_attempt == 1 && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == '')) }}
+    if: ${{ !cancelled() && (!(((github.run_attempt == 1 || github.run_attempt == 2 && github.event_name == 'pull_request' && needs.approval.outputs.admitted == 'true') && ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/') && github.head_ref != '' && github.base_ref != '') && github.ref != 'refs/heads/ci/issue25-discriminator' && github.head_ref != 'ci/issue25-discriminator' && github.base_ref != 'ci/issue25-discriminator' && github.ref != 'refs/heads/ci/issue25-independent-repeat' && github.head_ref != 'ci/issue25-independent-repeat' && github.base_ref != 'ci/issue25-independent-repeat' && github.ref != 'refs/heads/ci/issue25-harness-admission' && github.head_ref != 'ci/issue25-harness-admission' && github.base_ref != 'ci/issue25-harness-admission' && github.ref != 'refs/heads/ci/issue25-harness-replacement' && github.head_ref != 'ci/issue25-harness-replacement' && github.base_ref != 'ci/issue25-harness-replacement' && github.ref != 'refs/heads/ci/issue25-harness-repeat' && github.head_ref != 'ci/issue25-harness-repeat' && github.base_ref != 'ci/issue25-harness-repeat') || (github.run_attempt == 1 && github.event_name == 'push' && github.ref == 'refs/heads/ci/issue25-harness-admission' && github.head_ref == '' && github.base_ref == ''))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:

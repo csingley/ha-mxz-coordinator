@@ -11,8 +11,37 @@ permissions:
   contents: read
 
 jobs:
+  approval:
+    name: first-time contributor approval admission
+    # GitHub runs an approved first-time-contributor PR run as attempt 2; attempt 1
+    # is a zero-job placeholder held at action_required. Admit exactly that shape
+    # and nothing else: an ordinary re-run (attempt 1 executed jobs) stays refused.
+    if: ${{ github.run_attempt == 2 && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      admitted: ${{ steps.check.outputs.admitted }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Attempt 1 was only held for approval
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 tools/ci_approval_admission.py
+
   exact-ha202610:
     name: Python 3.14.8 / HA 2026.10.0 / generated plugin
+    needs: approval
+    # Runs on attempt 1 with approval skipped; any other attempt meets the guard below.
+    if: ${{ !cancelled() }}
+    env:
+      APPROVAL_ADMITTED: ${{ needs.approval.outputs.admitted }}
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
@@ -25,7 +54,7 @@ jobs:
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted || refuse runner
           test "${RUNNER_ARCH:-}" = X64 || refuse architecture
           test -n "${ImageOS:-}" || refuse image
-          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || refuse attempt
+          test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; } || refuse attempt
           [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || refuse source
           case "${GITHUB_EVENT_NAME:-}:${GITHUB_REF:-}" in
             push:refs/heads/*|workflow_dispatch:refs/heads/*) ;;

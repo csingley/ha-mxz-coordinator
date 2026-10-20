@@ -196,6 +196,9 @@ def test_additional_workflow_permissions_and_ordinary_execution():
     assert job["runs-on"] == "ubuntu-26.04"
     assert job["timeout-minutes"] == "25"
     assert "permissions" not in job and "environment" not in job and "secrets" not in job
+    assert job["needs"] == "approval" and job["if"] == "${{ !cancelled() }}"
+    assert set(wf["jobs"]) == {"approval", "exact-ha202610"}
+    assert wf["jobs"]["approval"]["permissions"] == {"contents": "read", "actions": "read"}
     actions = [s for s in job["steps"] if "uses" in s]
     assert actions == [{"uses": "actions/checkout@v4", "with": {"persist-credentials": "false"}}]
     assert job["steps"][-1]["if"] == "always()"
