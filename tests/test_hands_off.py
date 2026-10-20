@@ -38,6 +38,7 @@ from custom_components.mxz_coordinator.const import (
     CONF_ZONES,
     DOMAIN,
     IDLE_ACTION_FAN_ONLY,
+    INHIBIT_ACTION_ECO,
     INHIBIT_ACTION_OFF,
     ZONE_CLIMATE,
     ZONE_HANDS_OFF,
@@ -376,7 +377,7 @@ async def test_disabled_while_down_without_record_still_parks(hass: HomeAssistan
     await _recompute(hass, entry)
     await _remote(hass, head_b, "heat")
     await _shutdown(hass, entry)
-    # Strip the record, as a pre-3.6.0 store (state only, no extra data) has it.
+    # Strip the record, as a store from before this option (state only, no extra data) has it.
     restore = rs.async_get(hass)
     sid = _eid(hass, entry, "_secondary_enable")
     restore.last_states[sid] = rs.StoredState(
@@ -422,6 +423,31 @@ async def test_standby_hold_still_parks_a_released_head(hass: HomeAssistant) -> 
     hass.states.async_set(INHIBIT, "off")
     await hass.async_block_till_done()
     await _recompute(hass, entry)
+    await _remote(hass, head_b, "heat")
+    await _recompute(hass, entry)
+    assert _s(hass, head_b) == "heat"
+
+
+async def test_eco_standby_hold_also_holds_a_released_head_off(hass: HomeAssistant) -> None:
+    """An eco hold is no fixed park, but it is still a hold: the head is held off."""
+    hass.states.async_set(INHIBIT, "off")
+    entry, _a, head_b = await _setup(
+        hass, hands_off=(False, True),
+        **{CONF_INHIBIT_ENTITY: INHIBIT, CONF_INHIBIT_ACTION: INHIBIT_ACTION_ECO},
+    )
+    await _switch(hass, _eid(hass, entry, "_secondary_enable"), False)
+    await _recompute(hass, entry)
+    await _remote(hass, head_b, "heat")
+    hass.states.async_set(INHIBIT, "on")
+    await hass.async_block_till_done()
+    await _recompute(hass, entry)
+    assert _s(hass, head_b) == "off"
+    assert _plan(hass, entry).attributes["zones"][1]["hands_off_vote"] is None
+    await _remote(hass, head_b, "heat")
+    await _recompute(hass, entry)
+    assert _s(hass, head_b) == "off"
+    hass.states.async_set(INHIBIT, "off")
+    await hass.async_block_till_done()
     await _remote(hass, head_b, "heat")
     await _recompute(hass, entry)
     assert _s(hass, head_b) == "heat"

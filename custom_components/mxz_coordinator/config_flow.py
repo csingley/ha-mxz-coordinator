@@ -554,7 +554,7 @@ _ROOM_WIRING_FIELDS = (
     ("vane_horizontal", ZONE_VANE_HORIZONTAL),
 )
 # The room page's hands-off opt-in (flow key); stored as ZONE_HANDS_OFF only
-# when on, so an opted-out room's record is exactly what it was before 3.6.0.
+# when on, so an opted-out room's record is exactly what it was before this option existed.
 _HANDS_OFF_FIELD = "hands_off"
 _FRESHNESS_ZONE_FIELDS = (
     ("report_interval", ZONE_REPORT_INTERVAL),

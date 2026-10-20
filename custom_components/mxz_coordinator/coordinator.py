@@ -1636,7 +1636,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for zone, engage in zip(self.zones, engages):
             if zone.climate_id in self._vane_kicks:
                 continue  # mid vane-kick: leave the head alone until it finishes
-            if self._hands_off_phase(zone) is not None:
+            if self._hands_off_phase(zone) is not None and not self.inhibited:
+                # (Any standby hold, eco included, holds it off like any
+                # disabled room: the fixed parks never reach here.)
                 if zone.slug in self._hands_off_released:
                     continue  # its off landed: the head is someone else's now
                 head = self.hass.states.get(zone.climate_id)
@@ -3246,8 +3248,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         vote. Every other reported state (fan_only, dry, auto, heat_cool, off,
         unavailable) asks nothing of the outdoor unit's direction.
         """
-        if self._hands_off_phase(zone) != "released":
-            return None
+        if self._hands_off_phase(zone) != "released" or self.inhibited:
+            return None  # (a standby hold is holding it off)
         head = self.hass.states.get(zone.climate_id)
         if head is not None and head.state in (MODE_COOL, MODE_HEAT):
             return head.state
