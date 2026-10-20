@@ -364,8 +364,9 @@ class Demand:
 
     ``direction`` is :data:`MODE_COOL`, :data:`MODE_HEAT`, or ``None`` (wants nothing).
     ``priority`` is ``(tier, configured_index)``; lower sorts first.
-    ``read_only`` is True for an advisory want (a vote) that never corresponds to a
-    hardware command, False for a coordinated room's own demand.
+    ``read_only`` is True for an advisory want (a vote): it is never sent to the
+    voting head, though a safety vote that wins can still park another room's
+    head (see :class:`Grant`). False for a coordinated room's own demand.
     """
 
     direction: str | None
@@ -378,14 +379,22 @@ class Grant:
     """The arbitrated outcome for one tick.
 
     ``read_only`` is True only when THIS tick's answer differs from what it
-    would be considering commanding Demands alone -- i.e. an advisory want
-    is the reason the answer moved, not merely that one happens to be
-    active. Once the answer settles (nothing is actively changing it any
-    more), this reads False again, even while a vote is still what the
-    settled answer agrees with -- there is nothing left to exempt from the
-    dwell clock once nothing is proposing a change.
+    would be considering commanding Demands alone (an advisory want is the
+    reason the answer moved, not merely that one happens to be active) AND
+    the ordinary vote gate was open: no commanding Demand had a direction
+    and no room was engaged. Such a flip runs no coordinated head into a
+    reversal, so it is exempt from the dwell stamp. A safety vote that moves
+    the answer while a coordinated room is calling or engaged mid-run parks
+    that room's head, so it reads False and is stamped like any other flip.
+    Once the answer settles (nothing is actively changing it any more), this
+    reads False again, even while a vote is still what the settled answer
+    agrees with -- there is nothing left to exempt from the dwell clock once
+    nothing is proposing a change.
 
-    ``by_safety`` is True when the winning Demand carries PRIORITY_SAFETY.
+    ``by_safety`` is True while a PRIORITY_SAFETY Demand with a direction is
+    active and that direction is the answer. It does not claim the safety
+    tier changed the answer: the same answer may follow from order or the
+    dwell alone.
     """
 
     direction: str
@@ -448,10 +457,12 @@ def arbitrate(
         demands=[d.direction for d in active if d.direction and not d.read_only],
         current=current, allowed=allowed, resting=resting,
     )
-    # Exempt from the dwell stamp only when nothing commanding was running to
-    # reverse -- a safety vote overriding an active commanding demand is a
-    # real reversal (commanding_silent False), so it stamps like any other.
-    read_only = full != plain and commanding_silent
+    # Exempt from the dwell stamp only when the vote gate was open: no
+    # commanding room calling AND none still engaged mid-run. A safety vote
+    # that takes the mode from a calling room or from an engaged run that is
+    # coasting inside its band parks a running head -- a real reversal the
+    # coordinator causes -- so it stamps like any other flip.
+    read_only = full != plain and gate_open
     return Grant(direction=full, read_only=read_only, by_safety=by_safety)
 
 

@@ -3346,9 +3346,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Reads ``zone.safety_priority_entity`` (a binary_sensor) regardless of
         enable/hands_off -- either a coordinated room's own demand or a
-        hands-off room's vote may be marked safety. Unset or unavailable:
-        False, fail-open (no information, no override), matching
-        arbitration-grant's own posture for its equivalent input.
+        hands-off room's vote may be marked safety. Unset, missing, or any
+        state but exactly ``on`` (off, unavailable, unknown): False, i.e.
+        fail-safe -- no information, no override.
         """
         if zone.safety_priority_entity is None:
             return False
