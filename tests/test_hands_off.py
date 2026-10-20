@@ -608,7 +608,14 @@ async def test_safety_priority_vote_preempts_an_enabled_demand(hass: HomeAssista
     ordinary demand -- the real scenario the safety tier exists for: a
     released head in genuine distress must be able to get the compressor
     into its needed mode even though a sibling merely wants comfort in the
-    opposite direction and would otherwise outrank it by configured order."""
+    opposite direction and would otherwise outrank it by configured order.
+
+    Also covers the required dwell-stamp fix: parking an ACTIVELY RUNNING
+    demand is a real compressor reversal and stamps like any other, so a
+    safety sensor that flaps can't reverse the compressor twice inside one
+    hysteresis window -- confirmed by checking the reversal back is itself
+    held by the dwell, not by poking internal state, but by the attribute
+    the UI/REST API would show."""
     entry, head_a, head_b = await _setup(
         hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
         hysteresis=None,
@@ -625,7 +632,13 @@ async def test_safety_priority_vote_preempts_an_enabled_demand(hass: HomeAssista
 
     safety_entity = "binary_sensor.secondary_safety"
     hass.states.async_set(safety_entity, "on")
-    entry.runtime_data.zones[1].safety_priority_entity = safety_entity
+    manager = hass.config_entries.options
+    result = await open_options_page(hass, entry, "room_2")
+    result = await submit(
+        manager, result, {**prefilled(result), "safety_priority_entity": safety_entity},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()  # the option change reloads the entry
     entry.runtime_data._last_mode_change_ts = 0.0  # hysteresis long elapsed
     await _recompute(hass, entry)
 
@@ -634,7 +647,21 @@ async def test_safety_priority_vote_preempts_an_enabled_demand(hass: HomeAssista
     assert plan.attributes["standoff"] is True  # primary still wants cool
     assert plan.attributes["zones"][1]["hands_off_vote"] == "heat"
     assert plan.attributes["zones"][1]["safety_priority"] is True
+    assert plan.attributes["mode_by_safety"] is True
     assert _s(hass, head_a) != "cool"  # primary's denied demand is not commanded
+    # It parked an ACTIVELY RUNNING demand: this stamps the dwell (NOT
+    # exempt), unlike a vote settling into otherwise-idle silence. (The gate
+    # that just PERMITTED this flip reads True on this same tick by
+    # construction; the stamp's effect shows up starting next tick.)
+    assert plan.attributes["mode_by_hands_off"] is False
+
+    # Prove the stamp actually protects the compressor: the safety condition
+    # clearing immediately afterward must NOT reverse it back right away.
+    hass.states.async_set(safety_entity, "off")
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert plan.state == "heat"  # held by the dwell this reversal just started
+    assert plan.attributes["mode_change_allowed"] is False
 
 
 async def test_disabled_primary_never_idles_an_enabled_room(hass: HomeAssistant) -> None:
@@ -1007,15 +1034,23 @@ def test_vote_ranking_pure() -> None:
     # motivated generalizing priority instead of hardcoding "demand beats
     # vote": zone 1 is hands-off and in safety distress (wants heat); zone 0
     # is merely comfort-calling cool. The safety vote wins despite being a
-    # vote, and still reads back as read_only (never commands hardware).
+    # vote -- and reads back NOT read_only, since it's parking zone 0's
+    # actively running demand: a real compressor reversal, stamped like any
+    # other, so a flapping safety sensor can't reverse it twice inside one
+    # hysteresis window.
     assert decide(
         ["cool", "off"], ["cool", "off"], [None, "heat"], safety=[False, True],
-    ) == ("heat", True)
+    ) == ("heat", False)
     # A safety-asserting DEMAND preempts an ordinary vote, and is NOT
     # read_only (it's a coordinated room's own demand, commands hardware).
     assert decide(
         ["heat", "off"], ["heat", "off"], ["cool", None], current="cool", safety=[True, False],
     ) == ("heat", False)
+    # A safety vote deciding in silence (nothing commanding is running) is
+    # still exempt -- only OVERRIDING an active commanding demand stamps.
+    assert decide(
+        ["neutral", "off"], ["satisfied", "off"], [None, "heat"], safety=[False, True],
+    ) == ("heat", True)
 
 
 # ---------------------------------------------------------------------------

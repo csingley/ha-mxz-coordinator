@@ -384,10 +384,13 @@ class Grant:
     more), this reads False again, even while a vote is still what the
     settled answer agrees with -- there is nothing left to exempt from the
     dwell clock once nothing is proposing a change.
+
+    ``by_safety`` is True when the winning Demand carries PRIORITY_SAFETY.
     """
 
     direction: str
     read_only: bool
+    by_safety: bool
 
 
 def arbitrate(
@@ -426,7 +429,8 @@ def arbitrate(
     ordinary_votes = [
         d for d in ranked if d.read_only and d.priority[0] != PRIORITY_SAFETY
     ]
-    gate_open = not any(d.direction for d in commanding) and not engaged
+    commanding_silent = not any(d.direction for d in commanding)
+    gate_open = commanding_silent and not engaged
     active = sorted(
         commanding + safety_votes + (ordinary_votes if gate_open else []),
         key=lambda d: d.priority,
@@ -435,13 +439,20 @@ def arbitrate(
         demands=[d.direction for d in active if d.direction],
         current=current, allowed=allowed, resting=resting,
     )
+    by_safety = any(
+        d.direction == full and d.priority[0] == PRIORITY_SAFETY for d in active
+    )
     if not any(d.read_only and d.direction for d in active):
-        return Grant(direction=full, read_only=False)  # no vote active; nothing to compare against
+        return Grant(direction=full, read_only=False, by_safety=by_safety)
     plain = shared_mode(
         demands=[d.direction for d in active if d.direction and not d.read_only],
         current=current, allowed=allowed, resting=resting,
     )
-    return Grant(direction=full, read_only=full != plain)
+    # Exempt from the dwell stamp only when nothing commanding was running to
+    # reverse -- a safety vote overriding an active commanding demand is a
+    # real reversal (commanding_silent False), so it stamps like any other.
+    read_only = full != plain and commanding_silent
+    return Grant(direction=full, read_only=read_only, by_safety=by_safety)
 
 
 def setpoints(

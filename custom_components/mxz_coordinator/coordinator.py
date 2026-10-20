@@ -1015,6 +1015,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # a hands-off head's included.
                 "standoff": MODE_COOL in calls and MODE_HEAT in calls,
                 "mode_by_hands_off": by_votes,
+                "mode_by_safety": grant.by_safety,
                 "sensors_ok": all_ok,
                 "seconds_since_mode_change": int(elapsed),
                 "mode_change_allowed": allowed,
