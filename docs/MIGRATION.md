@@ -1,5 +1,26 @@
 # Upgrading and migrating MXZ Coordinator
 
+## Hands-off when disabled (in progress, not yet released)
+
+A per-room setting, **Hands-off when disabled**, in Configure → Rooms → (room). It is
+stored as `hands_off: true` in that room's record in the entry's `zones` list, and only
+when on; turning it off removes the key.
+
+**Existing entries are unchanged.** There is no config-entry version change and no
+migration: a room with no `hands_off` key is opted out, which is every room of every
+entry saved before this setting existed. An opted-out disabled room's head is held off
+on every update, exactly as before. Only `true` opts a room in; any other stored value
+is opted out.
+
+An opted-in room that is disabled and whose `off` has landed is remembered across a
+restart in the extra restore data of its enable switch (`hands_off_released`). A
+restore without that record (an older store, a lost store, a restore from before the
+entry was created) parks the head again, as a newly disabled room does. On a rollback
+to a release without this setting, the `hands_off` key is ignored and every disabled
+room is held off again; that was checked by reading the older code, not run.
+
+See [Run one room from its own remote](../README.md#run-one-room-from-its-own-remote).
+
 ## Idle action default (3.5.0)
 
 New setups default **When a room reaches target** (`idle_action`) to `off_after_dry`

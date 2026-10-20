@@ -640,6 +640,10 @@ edges.
   hardware AUTO or heat/cool simultaneously.
 - Turning the tile off disables that room. Disabling a room relinquishes its
   coordination; it does not promise to power the raw head off.
+- By default a disabled room's head is held off: MXZ turns it off on every update,
+  including after someone turns it on from its own remote or timer. To run one room
+  from its own remote instead, turn on **Hands-off when disabled** for it; see
+  [Run one room from its own remote](#run-one-room-from-its-own-remote).
 
 **What the coordinator does.** It commands mode and bounded setpoints for enabled
 rooms. Rooms run to target, then coast until their drift band is crossed. A fresh
@@ -692,6 +696,43 @@ could spend too early. After a room coasts, a follow-up refresh lets it progress
 without needing a head echo.
 
 </details>
+
+### Run one room from its own remote
+
+**Hands-off when disabled** is a per-room setting in Configure → Rooms → (room). It is
+off for every room, and for every room of an existing install after upgrading, so
+nothing changes until you turn it on.
+
+With it on, when you disable that room (its switch, or its tile set to `off`):
+
+- MXZ sends `off` and keeps sending it until the head reports `off`. A command the
+  head's integration rejects, or one that returns while the head still reports a
+  running mode, does not count. If the head is already off, nothing is sent.
+- From then on MXZ sends that head nothing. Use its own remote, timer or app. This
+  holds across a Home Assistant restart. Enabling the room hands the head back to the
+  plan; disabling it again sends `off` again, until it lands.
+- MXZ cannot tell an `off` that never arrived from one someone undid a moment later,
+  so the first `off` the head reports, with no other command of MXZ's still in
+  flight, ends the parking.
+- The room tile stays `off`, because its mode is the room's coordinator switch:
+  turning the tile on still enables the room. Its action (and so Apple Home's
+  current state) shows what the head is doing: the head's own action if it reports
+  one, else heating, cooling, fan or drying from its mode.
+- If the head runs `heat` or `cool`, that counts in the shared direction, below every
+  enabled room. It decides the direction only when no enabled room is calling or still
+  running to its target, and a direction change it causes alone does not start the
+  mode-change wait, so an enabled room that then calls the other way is not held back
+  by it. `sensor.*_plan` shows the head's vote in that room's `hands_off_vote` (its
+  `hands_off` reads `parking` or `released`), and `standoff` is true when it and
+  another room want opposite modes.
+- A standby hold still holds this head too: at the hold's park mode, or `off` under
+  an `eco` hold, for as long as the hold lasts. Afterwards the head is left alone
+  again. MXZ does not "heal" this head out of `dry` or `auto`.
+
+Two heads on one outdoor unit asking for opposite modes is still a standoff that the
+outdoor unit settles its own way (see
+[the problem it solves](#the-problem-stock-auto-starves-rooms)): the room you run by
+hand can make an enabled room wait, or wait itself.
 
 ### Who drives the fan
 
@@ -942,6 +983,17 @@ Want air moving instead? Choose **Fan only** in Configure → Fan and idle. See
 </details>
 
 <details>
+<summary><b>I want to run one room from its own remote</b></summary>
+
+Turn on **Hands-off when disabled** for that room in Configure → Rooms, then disable the
+room (its switch, or set its tile to `off`). MXZ turns the head off once and then leaves
+it alone until you enable the room again, across restarts too. Without that setting a
+disabled room's head is held off, and MXZ turns it back off whenever someone turns it on.
+See [Run one room from its own remote](#run-one-room-from-its-own-remote).
+
+</details>
+
+<details>
 <summary><b>The fan is running but the room is not heating or cooling</b></summary>
 
 Check the head's own mode first.
@@ -1150,7 +1202,7 @@ MXZ Coordinator got this good because people ran it on their own systems, found 
 - [@helicopterrun](https://github.com/helicopterrun) validated it on 3-zone hardware and did relentless, root-caused QA through the v3 beta ([#4](https://github.com/dkpnw/ha-mxz-coordinator/issues/4), [#5](https://github.com/dkpnw/ha-mxz-coordinator/issues/5), [#6](https://github.com/dkpnw/ha-mxz-coordinator/issues/6), [#7](https://github.com/dkpnw/ha-mxz-coordinator/issues/7)). Those reports led to the removal docs, single-setpoint head support and entry-scoped restore.
 - [@oliverbrandmueller](https://github.com/oliverbrandmueller) asked for metric units ([#2](https://github.com/dkpnw/ha-mxz-coordinator/issues/2)). Since 2.8.0 the coordinator runs in your Home Assistant temperature unit from end to end.
 - **mw1029** on the [Home Assistant forum](https://community.home-assistant.io/t/1018382) tried MXZ with the cloud-based `comfort_HA` integration and posted both entity dumps, which showed exactly where the two don't line up. Support for it is in progress.
-- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. Both are in review, so this work is in progress.
+- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Hands-off when disabled** setting is built from both, with him as co-author. It is in progress and not yet in a release.
 
 **Prior art and references**
 
