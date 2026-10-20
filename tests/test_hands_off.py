@@ -1206,6 +1206,65 @@ async def test_only_an_on_safety_sensor_claims_priority(
     assert (plan.state, plan.attributes["zones"][1]["safety_priority"]) == ("heat", True)
 
 
+async def test_safety_sensor_creates_no_want(hass: HomeAssistant) -> None:
+    """A room with no heat or cool call of its own (disabled and held off, or
+    enabled and coasting to target inside its band) gains nothing from its
+    sensor being on; only its call is raised."""
+    entry, head_a, head_b = await _setup(
+        hass, enable=("_primary_enable", "_coordinator_enable"), hysteresis=None,
+        safety=(None, SAFETY_B),
+    )
+    coord = entry.runtime_data
+    hass.states.async_set(SAFETY_B, "on")
+    await _set_temp(hass, SENSOR_A, 76)
+    await _set_temp(hass, SENSOR_B, 60)  # the held-off secondary is cold
+    coord._last_mode_change_ts = 0.0
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a), _s(hass, head_b)) == ("cool", "cool", "off")
+    assert plan.attributes["zones"][1]["safety_priority"] is True
+    assert plan.attributes["mode_by_safety"] is False
+    # Enabled now, the secondary calls heat, and its sensor wins at once.
+    await _switch(hass, _eid(hass, entry, "_secondary_enable"), True)
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a), _s(hass, head_b)) == ("heat", "fan_only", "heat")
+    assert plan.attributes["mode_by_safety"] is True
+    # Back inside its band it still runs to target, but calls nothing: the
+    # primary's call takes the mode once the wait has run out.
+    await _set_temp(hass, SENSOR_B, 68)
+    coord._last_mode_change_ts = 0.0
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.attributes["secondary_demand"], plan.attributes["secondary_engage"]) == (
+        "neutral", "heat",
+    )
+    assert (plan.state, _s(hass, head_a)) == ("cool", "cool")
+    assert plan.attributes["mode_by_safety"] is False
+
+
+async def test_standby_hold_silences_a_safety_vote(hass: HomeAssistant) -> None:
+    """The hold outranks the safety tier: the released head is held off and
+    casts no vote while the hold lasts."""
+    hass.states.async_set(INHIBIT, "off")
+    entry, _a, head_b = await _safety_setup(
+        hass, **{CONF_INHIBIT_ENTITY: INHIBIT, CONF_INHIBIT_ACTION: INHIBIT_ACTION_OFF},
+    )
+    await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
+    hass.states.async_set(SAFETY_B, "on")
+    entry.runtime_data._last_mode_change_ts = 0.0
+    await _recompute(hass, entry)
+    assert _plan(hass, entry).state == "heat"
+    hass.states.async_set(INHIBIT, "on")
+    await hass.async_block_till_done()
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert plan.attributes["inhibited"] is True
+    assert plan.attributes["zones"][1]["hands_off_vote"] is None
+    assert plan.attributes["mode_by_safety"] is False
+    assert _s(hass, head_b) == "off"
+
+
 async def test_safety_sensor_is_tracked_only_when_configured(hass: HomeAssistant) -> None:
     await _setup(hass, hands_off=(False, True))
     assert _tracked(hass, SENSOR_A) >= 1  # the room sensors are; the helper sees them
