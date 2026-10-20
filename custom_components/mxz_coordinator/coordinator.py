@@ -1694,13 +1694,22 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # direction is the older one; the request keeps the selector and the
         # clock it already set, and the refresh it queued computes next.
         # A flip only hands-off heads asked for is not one the coordinator
-        # caused, so it starts no dwell (see shared_mode_with_votes).
-        if state != self.current_shared_mode and selection_seq == self._selection_seq:
+        # caused, so it starts no dwell (see shared_mode_with_votes). Once a
+        # coordinated room runs in that mode, the mode is ours: stamp it then,
+        # as if that room had flipped it, so the next reversal is dwelled.
+        if selection_seq != self._selection_seq:
+            return
+        if state != self.current_shared_mode:
             self.current_shared_mode = state
             self._mode_by_votes = bool(plan.get("mode_by_hands_off"))
             if not self._mode_by_votes:
                 self._last_mode_change_ts = dt_util.utcnow().timestamp()
             self.async_update_listeners()  # let the shared-mode select re-render
+        elif self._mode_by_votes and state in (
+            *engages, *(plan[f"{zone.slug}_demand"] for zone in self.zones)
+        ):
+            self._mode_by_votes = False
+            self._last_mode_change_ts = dt_util.utcnow().timestamp()
 
     def _queue_delivery(
         self, climate_id: str, act: str, low: float, high: float,
