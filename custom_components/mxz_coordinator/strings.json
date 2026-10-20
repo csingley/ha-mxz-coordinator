@@ -461,10 +461,12 @@
           "stage": "Airflow sensor",
           "vane_vertical": "Vertical vane",
           "vane_horizontal": "Horizontal vane",
+          "safety_priority_entity": "Safety priority sensor",
           "hands_off": "Let its own remote run it while disabled"
         },
         "data_description": {
           "stage": "Shows the head's real fan speed while the fan is on auto.",
+          "safety_priority_entity": "A binary sensor that's on when this room is asserting a safety override (e.g. a freeze or overheat floor). While on, this room's want for heat or cool outranks every other room's, coordinated or hands-off.",
           "hands_off": "Off (the default): a disabled room's head is held off, as always. On: when you disable the room, MXZ turns the head off once, retrying until the head reports off. Then MXZ leaves the head alone until you enable the room again."
         },
         "sections": {

@@ -47,7 +47,13 @@ from custom_components.mxz_coordinator.const import (
     ZONE_NAME,
     ZONE_SENSOR,
 )
-from custom_components.mxz_coordinator.logic import shared_mode_with_votes
+from custom_components.mxz_coordinator.logic import (
+    PRIORITY_DEMAND,
+    PRIORITY_SAFETY,
+    PRIORITY_VOTE,
+    Demand,
+    arbitrate,
+)
 from tests.flow_pages import default, open_options_page, prefilled, submit
 from tests.test_drive import (
     SENSOR_A,
@@ -597,6 +603,40 @@ async def test_opposite_mode_head_is_a_visible_standoff(hass: HomeAssistant) -> 
     assert plan.attributes["zones"][1]["hands_off_vote"] == "heat"
 
 
+async def test_safety_priority_vote_preempts_an_enabled_demand(hass: HomeAssistant) -> None:
+    """A hands-off room's safety-asserting vote outranks an enabled room's
+    ordinary demand -- the real scenario the safety tier exists for: a
+    released head in genuine distress must be able to get the compressor
+    into its needed mode even though a sibling merely wants comfort in the
+    opposite direction and would otherwise outrank it by configured order."""
+    entry, head_a, head_b = await _setup(
+        hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
+        hysteresis=None,
+    )
+    await _set_temp(hass, SENSOR_A, 76)  # primary's ordinary demand: cool
+    await _recompute(hass, entry)  # the disabled secondary's park lands here
+    await _remote(hass, head_b, "heat")  # secondary's own remote: heat
+    for _ in range(2):
+        await _recompute(hass, entry)
+    # Baseline, no safety assertion: primary's demand wins (today's rule,
+    # unaffected by this patch when nothing claims safety).
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a)) == ("cool", "cool")
+
+    safety_entity = "binary_sensor.secondary_safety"
+    hass.states.async_set(safety_entity, "on")
+    entry.runtime_data.zones[1].safety_priority_entity = safety_entity
+    entry.runtime_data._last_mode_change_ts = 0.0  # hysteresis long elapsed
+    await _recompute(hass, entry)
+
+    plan = _plan(hass, entry)
+    assert plan.state == "heat"  # secondary's safety vote now wins
+    assert plan.attributes["standoff"] is True  # primary still wants cool
+    assert plan.attributes["zones"][1]["hands_off_vote"] == "heat"
+    assert plan.attributes["zones"][1]["safety_priority"] is True
+    assert _s(hass, head_a) != "cool"  # primary's denied demand is not commanded
+
+
 async def test_disabled_primary_never_idles_an_enabled_room(hass: HomeAssistant) -> None:
     """Probes pr28b2 and #27: a hands-off PRIMARY in heat vs an enabled hot secondary."""
     entry, head_a, head_b = await _setup(
@@ -920,13 +960,35 @@ async def test_no_vote_before_the_park_lands(hass: HomeAssistant) -> None:
 # ---------------------------------------------------------------------------
 # The ranking itself, pure
 # ---------------------------------------------------------------------------
+def _arb_demands(demands, votes, safety=None):
+    """Build the (demand, vote) Demand pairs _zone_arbitration_pair would, for
+    a test that wants to call :func:`arbitrate` directly without a Zone."""
+    safety = safety or [False] * len(demands)
+    pairs = []
+    for i, (demand, vote, is_safety) in enumerate(zip(demands, votes, safety)):
+        tier = PRIORITY_SAFETY if is_safety else None
+        pairs.append(Demand(
+            direction=demand if demand in ("cool", "heat") else None,
+            priority=(tier if tier is not None else PRIORITY_DEMAND, i),
+        ))
+        pairs.append(Demand(
+            direction=vote,
+            priority=(tier if tier is not None else PRIORITY_VOTE, i),
+            read_only=True,
+        ))
+    return pairs
+
+
 def test_vote_ranking_pure() -> None:
-    """Votes only fill silence; an enabled demand or run always decides."""
-    def decide(demands, engages, votes, current="cool", allowed=True):
-        return shared_mode_with_votes(
-            demands=demands, engages=engages, votes=votes,
-            current=current, allowed=allowed,
+    """Votes only fill silence; an enabled demand or run always decides --
+    UNLESS a safety priority is asserted, which outranks either kind."""
+    def decide(demands, engages, votes, current="cool", allowed=True, safety=None):
+        engaged = any(e in ("cool", "heat") for e in engages)
+        grant = arbitrate(
+            _arb_demands(demands, votes, safety),
+            engaged=engaged, current=current, allowed=allowed,
         )
+        return (grant.direction, grant.read_only)
 
     # Silence: the vote decides, and says so (no dwell stamp).
     assert decide(["neutral", "off"], ["satisfied", "off"], [None, "heat"]) == ("heat", True)
@@ -941,6 +1003,19 @@ def test_vote_ranking_pure() -> None:
     # Non-heat/cool observations are no vote at all.
     for junk in ("fan_only", "dry", "auto", "heat_cool", "off", "unavailable", None):
         assert decide(["neutral", "off"], ["satisfied", "off"], [None, junk]) == ("cool", False)
+    # A safety-asserting VOTE preempts an ordinary DEMAND -- the gap that
+    # motivated generalizing priority instead of hardcoding "demand beats
+    # vote": zone 1 is hands-off and in safety distress (wants heat); zone 0
+    # is merely comfort-calling cool. The safety vote wins despite being a
+    # vote, and still reads back as read_only (never commands hardware).
+    assert decide(
+        ["cool", "off"], ["cool", "off"], [None, "heat"], safety=[False, True],
+    ) == ("heat", True)
+    # A safety-asserting DEMAND preempts an ordinary vote, and is NOT
+    # read_only (it's a coordinated room's own demand, commands hardware).
+    assert decide(
+        ["heat", "off"], ["heat", "off"], ["cool", None], current="cool", safety=[True, False],
+    ) == ("heat", False)
 
 
 # ---------------------------------------------------------------------------
