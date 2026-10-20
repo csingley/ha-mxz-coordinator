@@ -794,6 +794,17 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             )
             self.hass.async_create_task(self._evaluate_inhibit())
+        # React to a safety-priority sensor immediately rather than waiting
+        # for the next unrelated temp report/heartbeat.
+        safety_entities = [
+            zone.safety_priority_entity for zone in self.zones if zone.safety_priority_entity
+        ]
+        if safety_entities:
+            self._unsubs.append(
+                async_track_state_change_event(
+                    self.hass, safety_entities, self._on_safety_change
+                )
+            )
         self._unsubs.append(async_at_start(self.hass, self._on_ha_start))
         await self.async_refresh()
 
@@ -3499,6 +3510,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _on_inhibit_change(self, _event: Event) -> None:
         """The watched inhibit entity changed -> re-evaluate the hold."""
         self.hass.async_create_task(self._evaluate_inhibit())
+
+    @callback
+    def _on_safety_change(self, _event: Event) -> None:
+        """A zone's safety-priority sensor changed -> recompute now."""
+        self.hass.async_create_task(self.async_request_refresh())
 
     async def _evaluate_inhibit(self) -> None:
         """Re-read the inhibit entity; act only on a change of hold state.
