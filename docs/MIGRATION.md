@@ -1,6 +1,6 @@
 # Upgrading and migrating MXZ Coordinator
 
-## Safety priority (in progress, not yet released)
+## Safety priority (3.7.0)
 
 A per-room setting, **Safety priority**, in Configure → Rooms → (room): an optional
 `binary_sensor` reference. Stored as `safety_priority_entity` in that room's record in
