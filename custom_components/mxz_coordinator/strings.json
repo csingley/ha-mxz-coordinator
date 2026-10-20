@@ -461,11 +461,11 @@
           "stage": "Airflow sensor",
           "vane_vertical": "Vertical vane",
           "vane_horizontal": "Horizontal vane",
-          "hands_off": "Hands-off when disabled"
+          "hands_off": "Let its own remote run it while disabled"
         },
         "data_description": {
           "stage": "Shows the head's real fan speed while the fan is on auto.",
-          "hands_off": "Off keeps a disabled room's head off. On turns it off when you disable the room (and keeps trying until the head reports off), then leaves it alone until you enable it again, so it can run from its own remote."
+          "hands_off": "Off (the default): a disabled room's head is held off, as always. On: when you disable the room, MXZ turns the head off once, retrying until the head reports off. Then MXZ leaves the head alone until you enable the room again."
         },
         "sections": {
           "freshness": {

@@ -151,11 +151,12 @@ supported hardware and setup apply. It is not tested for parity with this integr
 
 ## What's new in 3.6.0
 
-- **Run one room from its own remote.** A new per-room setting, **Hands-off when
-  disabled**, in Configure → Rooms → (room). With it on, disabling that room sends
-  `off` until the head reports `off`, then leaves the head to its own remote, timer or
-  app, across a restart too. The room tile shows what the head is really doing, and its
-  heat or cool counts in the shared direction below every enabled room. Built from
+- **Run one room from its own remote.** A new per-room setting, **Let its own remote
+  run it while disabled**, in Configure → Rooms → (room). With it on, disabling that
+  room sends `off` until the head reports `off`, then leaves the head to its own
+  remote, timer or app, across a restart too. The room tile shows what the head is
+  really doing, and its heat or cool counts in the shared direction below every
+  enabled room. Built from
   [@csingley](https://github.com/csingley)'s
   [#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27) and
   [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28). See
@@ -163,7 +164,7 @@ supported hardware and setup apply. It is not tested for parity with this integr
 - **Upgrading changes nothing.** The setting is off for every room, including every room
   of an existing install, so a disabled room is held off exactly as before until you
   turn it on. There is no migration. See
-  [Hands-off when disabled](docs/MIGRATION.md#hands-off-when-disabled-360).
+  [Run one room from its own remote (3.6.0)](docs/MIGRATION.md#run-one-room-from-its-own-remote-360).
 
 From 3.5.0:
 
@@ -648,8 +649,8 @@ edges.
   coordination; it does not promise to power the raw head off.
 - By default a disabled room's head is held off: MXZ turns it off on every update,
   including after someone turns it on from its own remote or timer. To run one room
-  from its own remote instead, turn on **Hands-off when disabled** for it; see
-  [Run one room from its own remote](#run-one-room-from-its-own-remote).
+  from its own remote instead, turn on **Let its own remote run it while disabled**
+  for it; see [Run one room from its own remote](#run-one-room-from-its-own-remote).
 
 **What the coordinator does.** It commands mode and bounded setpoints for enabled
 rooms. Rooms run to target, then coast until their drift band is crossed. A fresh
@@ -705,9 +706,10 @@ without needing a head echo.
 
 ### Run one room from its own remote
 
-**Hands-off when disabled** is a per-room setting in Configure → Rooms → (room). It is
-off for every room, and for every room of an existing install after upgrading, so
-nothing changes until you turn it on.
+**Let its own remote run it while disabled** is a per-room setting in Configure →
+Rooms → (room). It is off for every room, and for every room of an existing install
+after upgrading, so nothing changes until you turn it on: a disabled room's head is
+held off, as always.
 
 With it on, when you disable that room (its switch, or its tile set to `off`):
 
@@ -994,10 +996,10 @@ Want air moving instead? Choose **Fan only** in Configure → Fan and idle. See
 <details>
 <summary><b>I want to run one room from its own remote</b></summary>
 
-Turn on **Hands-off when disabled** for that room in Configure → Rooms, then disable the
-room (its switch, or set its tile to `off`). MXZ turns the head off (and keeps trying
-until the head reports `off`), then leaves it alone until you enable the room again,
-across restarts too. Without that setting a
+Turn on **Let its own remote run it while disabled** for that room in Configure →
+Rooms, then disable the room (its switch, or set its tile to `off`). MXZ turns the head
+off once, retrying until the head reports `off`. Then MXZ leaves it alone until you
+enable the room again, across restarts too. With the setting off (the default), a
 disabled room's head is held off, and MXZ turns it back off whenever someone turns it on.
 See [Run one room from its own remote](#run-one-room-from-its-own-remote).
 
@@ -1212,7 +1214,7 @@ MXZ Coordinator got this good because people ran it on their own systems, found 
 - [@helicopterrun](https://github.com/helicopterrun) validated it on 3-zone hardware and did relentless, root-caused QA through the v3 beta ([#4](https://github.com/dkpnw/ha-mxz-coordinator/issues/4), [#5](https://github.com/dkpnw/ha-mxz-coordinator/issues/5), [#6](https://github.com/dkpnw/ha-mxz-coordinator/issues/6), [#7](https://github.com/dkpnw/ha-mxz-coordinator/issues/7)). Those reports led to the removal docs, single-setpoint head support and entry-scoped restore.
 - [@oliverbrandmueller](https://github.com/oliverbrandmueller) asked for metric units ([#2](https://github.com/dkpnw/ha-mxz-coordinator/issues/2)). Since 2.8.0 the coordinator runs in your Home Assistant temperature unit from end to end.
 - **mw1029** on the [Home Assistant forum](https://community.home-assistant.io/t/1018382) tried MXZ with the cloud-based `comfort_HA` integration and posted both entity dumps, which showed exactly where the two don't line up. Support for it is in progress.
-- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Hands-off when disabled** setting is built from both, with him as co-author. It is set for 3.6.0, which is not released yet.
+- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author. It is set for 3.6.0, which is not released yet.
 
 **Prior art and references**
 

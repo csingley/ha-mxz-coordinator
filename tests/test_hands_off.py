@@ -903,12 +903,28 @@ async def test_room_page_opts_one_room_in_and_out(hass: HomeAssistant) -> None:
     assert [z.hands_off for z in entry.runtime_data.zones] == [False, False]
 
 
+_HANDS_OFF_LABEL = "Let its own remote run it while disabled"
+_HANDS_OFF_DESCRIPTION = (
+    "Off (the default): a disabled room's head is held off, as always. "
+    "On: when you disable the room, MXZ turns the head off once, retrying until "
+    "the head reports off. Then MXZ leaves the head alone until you enable the "
+    "room again."
+)
+
+
 def test_room_page_copy_is_translated() -> None:
-    """The field has a label and a description in strings.json and en.json alike."""
+    """The field has this label and description in strings.json and en.json alike."""
     root = Path("custom_components/mxz_coordinator")
     copies = []
     for path in (root / "strings.json", root / "translations/en.json"):
         room = json.loads(path.read_text())["options"]["step"]["room"]
         copies.append((room["data"]["hands_off"], room["data_description"]["hands_off"]))
-    assert copies[0] == copies[1]
-    assert copies[0][0] and "own remote" in copies[0][1]
+    assert copies == [(_HANDS_OFF_LABEL, _HANDS_OFF_DESCRIPTION)] * 2
+
+
+def test_docs_name_the_setting_by_its_label() -> None:
+    """README and MIGRATION.md use the field's label, never the retired one."""
+    for path in (Path("README.md"), Path("docs/MIGRATION.md")):
+        text = path.read_text()
+        assert f"**{_HANDS_OFF_LABEL}**" in text, path
+        assert "Hands-off when disabled" not in text, path

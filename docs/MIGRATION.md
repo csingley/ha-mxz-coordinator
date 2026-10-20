@@ -1,10 +1,10 @@
 # Upgrading and migrating MXZ Coordinator
 
-## Hands-off when disabled (3.6.0)
+## Run one room from its own remote (3.6.0)
 
-A per-room setting, **Hands-off when disabled**, in Configure → Rooms → (room). It is
-stored as `hands_off: true` in that room's record in the entry's `zones` list, and only
-when on; turning it off removes the key.
+A per-room setting, **Let its own remote run it while disabled**, in Configure →
+Rooms → (room). It is stored as `hands_off: true` in that room's record in the entry's
+`zones` list, and only when on; turning it off removes the key.
 
 **Existing entries are unchanged.** There is no config-entry version change and no
 migration: a room with no `hands_off` key is opted out, which is every room of every
