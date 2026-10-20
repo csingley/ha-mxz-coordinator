@@ -513,6 +513,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # included, exactly as an opted-out room's is. Cleared when the room is
         # enabled again; restored across a restart by its enable switch.
         self._hands_off_released: set[str] = set()
+        # The shared mode was last moved by hands-off votes alone. Going back
+        # from it while no coordinated room calls is undoing the vote, not a
+        # flip of ours, so that starts no dwell either (see _compute).
+        self._mode_by_votes = False
 
         # Vane-kick bookkeeping: heads mid-kick are skipped by _apply so the
         # plan doesn't turn them back off while the louvre is still traveling.
@@ -959,6 +963,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             allowed=allowed,
             resting=self._resting_bias(),
         )
+        if (
+            not by_votes and self._mode_by_votes and state != current
+            and not any(c in (MODE_COOL, MODE_HEAT) for c in (*demands, *engages))
+        ):
+            by_votes = True
         calls = [*demands, *votes]
         plan.update(
             {
@@ -1688,7 +1697,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # caused, so it starts no dwell (see shared_mode_with_votes).
         if state != self.current_shared_mode and selection_seq == self._selection_seq:
             self.current_shared_mode = state
-            if not plan.get("mode_by_hands_off"):
+            self._mode_by_votes = bool(plan.get("mode_by_hands_off"))
+            if not self._mode_by_votes:
                 self._last_mode_change_ts = dt_util.utcnow().timestamp()
             self.async_update_listeners()  # let the shared-mode select re-render
 
@@ -3316,6 +3326,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._selection_seq += 1
         if mode != self.current_shared_mode:
             self.current_shared_mode = mode
+            self._mode_by_votes = False
             self._last_mode_change_ts = dt_util.utcnow().timestamp()
         await self.async_request_refresh()
 

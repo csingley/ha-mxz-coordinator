@@ -598,6 +598,31 @@ async def test_vote_decides_only_when_no_enabled_room_calls(hass: HomeAssistant)
     assert _s(hass, head_b) == "heat"
 
 
+async def test_return_to_rest_after_a_vote_starts_no_dwell(hass: HomeAssistant) -> None:
+    """With a resting bias, the plan going back to rest when the hands-off head
+    stops is the vote's undoing, not a flip of ours: an enabled room calling
+    right after is not held back by a dwell."""
+    entry, head_a, head_b = await _setup(
+        hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
+        hysteresis=None, **{CONF_RESTING_MODE_BIAS: "cool"},
+    )
+    coord = entry.runtime_data
+    await _recompute(hass, entry)
+    coord._last_mode_change_ts = 0.0
+    await _remote(hass, head_b, "heat")
+    await _recompute(hass, entry)
+    assert _plan(hass, entry).state == "heat"
+    await _remote(hass, head_b, "off")
+    await _recompute(hass, entry)
+    assert _plan(hass, entry).state == "cool"
+    assert coord._last_mode_change_ts == 0.0
+    await _set_temp(hass, SENSOR_A, 64)  # the enabled primary needs heat
+    await _recompute(hass, entry)
+    assert _plan(hass, entry).state == "heat"
+    assert _s(hass, head_a) == "heat"
+    assert coord._last_mode_change_ts > 0.0  # an enabled room's flip is stamped
+
+
 async def test_vote_never_breaks_an_engaged_run(hass: HomeAssistant) -> None:
     """A room mid-run toward target (engaged, its demand back inside the band)
     is calling: the hands-off vote does not take the mode from it."""
