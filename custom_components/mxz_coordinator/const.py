@@ -69,6 +69,12 @@ ZONE_STARTUP_GRACE = "startup_grace"
 # A user or integration can still misstate that external contract, and a
 # generic monitor cannot detect the mistake (docs/MIGRATION.md says so).
 ZONE_EVIDENCE_BASIS = "evidence_basis"
+# Opt-in per room, absent = off (every entry stored before 3.6.0 is opted out).
+# Off: a disabled room's head is held off every cycle, as it always has been.
+# On: disabling sends off until the head is seen off, then the coordinator
+# leaves that head alone until the room is enabled again (someone can run it
+# from its own remote), and its observed heat/cool is a low-priority vote.
+ZONE_HANDS_OFF = "hands_off"
 ZONE_SAMPLE_TIMESTAMP_ATTR = "sample_timestamp_attribute"
 ZONE_SAMPLE_SEQUENCE_ATTR = "sample_sequence_attribute"
 EVIDENCE_UNKNOWN = "unknown"

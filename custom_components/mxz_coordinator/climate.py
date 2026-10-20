@@ -52,6 +52,15 @@ from .const import (
 from .coordinator import MXZCoordinator, Zone, read_room_temp
 from .entity import MXZEntity
 
+# What a head is doing, from its mode, when it reports no hvac_action itself.
+_ACTION_FOR_MODE = {
+    HVACMode.OFF: HVACAction.OFF,
+    HVACMode.HEAT: HVACAction.HEATING,
+    HVACMode.COOL: HVACAction.COOLING,
+    HVACMode.FAN_ONLY: HVACAction.FAN,
+    HVACMode.DRY: HVACAction.DRYING,
+}
+
 # Independent horizontal swing was added in HA 2024.12; guard for older cores.
 _HAS_HORIZONTAL_SWING = hasattr(ClimateEntityFeature, "SWING_HORIZONTAL_MODE")
 
@@ -199,7 +208,13 @@ class MXZRoomClimate(MXZEntity, CoordinatorEntity[MXZCoordinator], ClimateEntity
 
     @property
     def hvac_mode(self) -> HVACMode:
-        """OFF when the room is disabled; otherwise the single-target auto mode."""
+        """OFF when the room is disabled; otherwise the single-target auto mode.
+
+        Hands-off rooms too: this mode is the room's coordinator switch (OFF =
+        the coordinator is not running this room), it is what turning the tile
+        on/off writes, and HEAT_COOL is its only other mode. What a person is
+        running on the head shows in ``hvac_action`` instead.
+        """
         return HVACMode.HEAT_COOL if self._enabled else HVACMode.OFF
 
     @property
@@ -209,7 +224,13 @@ class MXZRoomClimate(MXZEntity, CoordinatorEntity[MXZCoordinator], ClimateEntity
         A room may be engaged (wants heat) while the shared compressor runs the
         other mode — its head is parked, so the action must read IDLE, not
         HEATING. Only an engagement matching the plan's shared mode is active.
+
+        A disabled hands-off room shows its head as it is: someone may be
+        running it on its own remote, and the tile (and Apple Home) must not
+        say off while it heats.
         """
+        if self._zone.hands_off and not self._enabled:
+            return self._head_action()
         if not self.coordinator.coordinator_enable or not self._enabled:
             return HVACAction.OFF
         engage = (self.coordinator.data or {}).get(f"{self._zone.slug}_engage")
@@ -219,6 +240,16 @@ class MXZRoomClimate(MXZEntity, CoordinatorEntity[MXZCoordinator], ClimateEntity
         if engage == MODE_HEAT and shared == MODE_HEAT:
             return HVACAction.HEATING
         return HVACAction.IDLE  # satisfied / parked (opposite mode) / neutral
+
+    def _head_action(self) -> HVACAction:
+        """The head's own hvac_action when it reports one, else from its mode."""
+        head = self.hass.states.get(self._head_id)
+        if head is None or head.state in UNAVAILABLE_STATES:
+            return HVACAction.OFF
+        reported = head.attributes.get("hvac_action")
+        if reported in HVACAction.__members__.values():
+            return HVACAction(reported)
+        return _ACTION_FOR_MODE.get(head.state, HVACAction.IDLE)
 
     # -- vane / swing (optional passthrough to a select entity) -------------
     @property

@@ -347,6 +347,40 @@ def shared_mode(
     return current
 
 
+def shared_mode_with_votes(
+    *,
+    demands: list[str],
+    engages: list[str],
+    votes: list[str | None],
+    current: str,
+    allowed: bool,
+    resting: str | None = None,
+) -> tuple[str, bool]:
+    """:func:`shared_mode`, with hands-off heads' observed modes ranked last.
+
+    ``votes`` is what each hands-off head is actually running (cool|heat, else
+    None), in zone order. They decide ONLY when no coordinated room is calling:
+    no cool/heat demand and no engaged run. A room mid-run toward its target
+    is calling even when its demand is back inside the band, so a vote can
+    never take the mode from it.
+
+    Returns ``(mode, by_votes)``; ``by_votes`` is True when the votes changed
+    the answer. Such a change is not a compressor reversal the coordinator
+    caused, so the caller does not stamp the mode-flip clock for it: an
+    enabled room calling afterwards is never held back by a dwell the votes
+    started.
+    """
+    plain = shared_mode(
+        demands=demands, current=current, allowed=allowed, resting=resting
+    )
+    calls = (MODE_COOL, MODE_HEAT)
+    cast = [vote for vote in votes if vote in calls]
+    if not cast or any(call in calls for call in (*demands, *engages)):
+        return (plain, False)
+    voted = shared_mode(demands=cast, current=current, allowed=allowed, resting=resting)
+    return (voted, voted != plain)
+
+
 def setpoints(
     *,
     mode: str,

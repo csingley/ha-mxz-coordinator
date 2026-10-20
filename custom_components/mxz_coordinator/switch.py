@@ -195,6 +195,23 @@ class MXZSwitch(MXZBaseSwitch):
                 self.coordinator._startup_resume.clear()
 
 
+@dataclass(frozen=True)
+class ZoneEnableRestoreData(ExtraStoredData):
+    """What a room's enable switch carries across a restart beside its state.
+
+    ``hands_off_released``: the room is opted in to hands-off, disabled, and
+    its off had landed — so after a restart the head is still left alone
+    rather than parked again. Absent (an older store) or anything but True is
+    not released, and that room parks, as a newly disabled room does.
+    """
+
+    hands_off_released: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize for the restore store."""
+        return {"hands_off_released": self.hands_off_released}
+
+
 class MXZZoneEnableSwitch(MXZBaseSwitch):
     """One zone's enable flag (seeds Zone.enable)."""
 
@@ -209,9 +226,36 @@ class MXZZoneEnableSwitch(MXZBaseSwitch):
         self._attr_translation_key = "zone_enable"
         self._attr_translation_placeholders = {"zone": zone.name}
 
+    async def async_added_to_hass(self) -> None:
+        """Restore the state, then a hands-off room's landed park.
+
+        Only for a room still opted in and restored disabled from THIS entry
+        (#7): anything else parks, as a newly disabled room does.
+        """
+        await super().async_added_to_hass()
+        if self._attr_is_on or not self._zone.hands_off:
+            return
+        last = await self.async_get_last_state()
+        if last is None or self._restored_state_is_stale(last) or last.state != "off":
+            return
+        extra = await self.async_get_last_extra_data()
+        if extra is not None and extra.as_dict().get("hands_off_released") is True:
+            self.coordinator.restore_hands_off(self._zone.slug)
+
+    @property
+    def extra_restore_state_data(self) -> ZoneEnableRestoreData:
+        """Read live at every restore dump, so it needs no state write."""
+        return ZoneEnableRestoreData(
+            self.coordinator.hands_off_released(self._zone.slug)
+        )
+
     def _seed(self, *, restored: bool = False) -> None:
         was_enabled = self._zone.enable
         self._zone.enable = self._attr_is_on
+        if self._attr_is_on:
+            # Enabled: the plan drives the head again, and the next
+            # disablement parks afresh.
+            self.coordinator._hands_off_released.discard(self._zone.slug)
         if restored and self._attr_is_on:
             self.coordinator._startup_resume[self._zone.slug] = None
         elif restored or not was_enabled or not self._attr_is_on:

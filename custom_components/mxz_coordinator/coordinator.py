@@ -123,6 +123,7 @@ from .const import (
     VANE_KICK_SPINUP,
     ZONE_CLIMATE,
     ZONE_EVIDENCE_BASIS,
+    ZONE_HANDS_OFF,
     ZONE_MAX_AGE,
     ZONE_NAME,
     ZONE_REPORT_INTERVAL,
@@ -147,7 +148,7 @@ from .logic import (
     season_lockouts,
     sensor_health,
     setpoints,
-    shared_mode,
+    shared_mode_with_votes,
 )
 
 if TYPE_CHECKING:
@@ -265,6 +266,8 @@ class Zone:
     # engage_deadband. Owned by the zone's drift number entity, exactly like
     # target/enable; automations write it (presence tiers etc.).
     drift: float | None = None
+    # Hands-off opt-in (ZONE_HANDS_OFF), from config; only a stored True opts in.
+    hands_off: bool = False
     # This SENSOR's reporting contract, as configured (durations in minutes,
     # or None when the room's cadence is unknown; the basis defaults to
     # unknown). Read once into the resolved freshness window and evidence
@@ -316,6 +319,7 @@ def _parse_zones(conf: dict[str, Any], target_default: float) -> list[Zone]:
             vane_horizontal_id=z.get(ZONE_VANE_HORIZONTAL) or None,
             stage_sensor_id=z.get(ZONE_STAGE_SENSOR) or None,
             target=target_default,
+            hands_off=z.get(ZONE_HANDS_OFF) is True,
             report_interval=z.get(ZONE_REPORT_INTERVAL),
             max_age=z.get(ZONE_MAX_AGE),
             startup_grace=z.get(ZONE_STARTUP_GRACE),
@@ -500,6 +504,15 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # run awaiting a usable sensor. Keep that observation across our own
         # sensor-failure park, without changing the ordinary dropout policy.
         self._startup_resume: dict[str, str | None] = {}
+        # Hands-off rooms (opted in, disabled) whose off has LANDED: the head
+        # was seen off with none of our other commands still in flight. From
+        # then on the coordinator leaves that head alone — nothing tells a
+        # person's later change from an off that never arrived, so the line is
+        # drawn at the first off seen. A disabled hands-off room NOT in here is
+        # still parking, and its off is re-sent every cycle, a rejected one
+        # included, exactly as an opted-out room's is. Cleared when the room is
+        # enabled again; restored across a restart by its enable switch.
+        self._hands_off_released: set[str] = set()
 
         # Vane-kick bookkeeping: heads mid-kick are skipped by _apply so the
         # plan doesn't turn them back off while the louvre is still traveling.
@@ -848,6 +861,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         engages: list[str] = []
         healths: list[str] = []
         ages: list[float | None] = []
+        votes: list[str | None] = []
         all_ok = True
         coasted = False
         for zone in self.zones:
@@ -919,6 +933,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 coasted = True
             demands.append(demand)
             engages.append(engage)
+            votes.append(self._hands_off_vote(zone))
             healths.append(health)
             ages.append(age)
             plan[f"{zone.slug}_demand"] = demand
@@ -936,12 +951,15 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current = self._arbitration_mode()
         elapsed = now - self._last_mode_change_ts
         allowed = elapsed >= self.hysteresis
-        state = shared_mode(
+        state, by_votes = shared_mode_with_votes(
             demands=demands,
+            engages=engages,
+            votes=votes,
             current=current,
             allowed=allowed,
             resting=self._resting_bias(),
         )
+        calls = [*demands, *votes]
         plan.update(
             {
                 "state": state,
@@ -958,11 +976,16 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "sensor_health": healths[i],
                         "sensor_age": None if ages[i] is None else int(ages[i]),
                         "control_reasons": self._control_reasons(zone),
+                        "hands_off": self._hands_off_phase(zone),
+                        "hands_off_vote": votes[i],
                         **self.command_attributes(zone.climate_id),
                     }
                     for i, zone in enumerate(self.zones)
                 ],
-                "standoff": MODE_COOL in demands and MODE_HEAT in demands,
+                # Both directions physically asked of the one outdoor unit,
+                # a hands-off head's included.
+                "standoff": MODE_COOL in calls and MODE_HEAT in calls,
+                "mode_by_hands_off": by_votes,
                 "sensors_ok": all_ok,
                 "seconds_since_mode_change": int(elapsed),
                 "mode_change_allowed": allowed,
@@ -1483,8 +1506,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._cancel_dwell_timer()  # this plan already had its free hand
             return
         current = self._arbitration_mode()
-        would_flip_to = shared_mode(
+        would_flip_to, _by_votes = shared_mode_with_votes(
             demands=[plan[f"{zone.slug}_demand"] for zone in self.zones],
+            engages=[plan[f"{zone.slug}_engage"] for zone in self.zones],
+            votes=[view.get("hands_off_vote") for view in plan.get("zones", ())],
             current=current,
             allowed=True,
             resting=self._resting_bias(),
@@ -1611,6 +1636,17 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for zone, engage in zip(self.zones, engages):
             if zone.climate_id in self._vane_kicks:
                 continue  # mid vane-kick: leave the head alone until it finishes
+            if self._hands_off_phase(zone) is not None:
+                if zone.slug in self._hands_off_released:
+                    continue  # its off landed: the head is someone else's now
+                head = self.hass.states.get(zone.climate_id)
+                if (
+                    head is not None and head.state == MODE_OFF
+                    and zone.climate_id not in self._deliveries
+                ):
+                    self._hands_off_released.add(zone.slug)
+                    continue  # already off, nothing of ours in flight: landed
+                # Otherwise the ordinary disabled path below sends off again.
             if zone.slug in self._startup_resume:
                 head = self.hass.states.get(zone.climate_id)
                 if head is None or head.state in UNAVAILABLE_STATES:
@@ -1646,9 +1682,12 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # were in flight. This plan was computed before that request, so its
         # direction is the older one; the request keeps the selector and the
         # clock it already set, and the refresh it queued computes next.
+        # A flip only hands-off heads asked for is not one the coordinator
+        # caused, so it starts no dwell (see shared_mode_with_votes).
         if state != self.current_shared_mode and selection_seq == self._selection_seq:
             self.current_shared_mode = state
-            self._last_mode_change_ts = dt_util.utcnow().timestamp()
+            if not plan.get("mode_by_hands_off"):
+                self._last_mode_change_ts = dt_util.utcnow().timestamp()
             self.async_update_listeners()  # let the shared-mode select re-render
 
     def _queue_delivery(
@@ -3061,8 +3100,23 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ):
                 refresh_needed = True
 
+        if mode == MODE_OFF:
+            # A parking hands-off head seen off has landed, unless a command
+            # of ours other than that off is still in flight (it could still
+            # turn the head back on). The off may be ours or a person's: the
+            # head is off either way, and anything after this is theirs.
+            active = self._deliveries.get(entity_id)
+            if active is None or active["act"] == MODE_OFF:
+                for zone in self.zones:
+                    if (
+                        zone.climate_id == entity_id
+                        and self._hands_off_phase(zone) == "parking"
+                    ):
+                        self._hands_off_released.add(zone.slug)
         self._arm_or_cancel(
-            entity_id, "band", mode in BANNED_MODES, BAND_DRIFT_DELAY
+            entity_id, "band",
+            mode in BANNED_MODES and not self._hands_off_head(entity_id),
+            BAND_DRIFT_DELAY,
         )
         # Never heal a head the standby hold parked off (nor a wall override
         # mid-hold — a human turning a parked head on during an outage wins),
@@ -3135,7 +3189,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         state = self.hass.states.get(entity_id)
         mode = state.state if state else None
         if kind == "band":
-            still = mode in BANNED_MODES
+            still = mode in BANNED_MODES and not self._hands_off_head(entity_id)
         else:
             still = (
                 mode == MODE_OFF
@@ -3170,6 +3224,42 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return any(
             zone.enable for zone in self.zones if zone.climate_id == climate_id
         )
+
+    # -- hands-off rooms (opt-in) --------------------------------------------
+    def _hands_off_phase(self, zone: Zone) -> str | None:
+        """None unless the room is opted in AND disabled; then parking|released."""
+        if not zone.hands_off or zone.enable:
+            return None
+        return "released" if zone.slug in self._hands_off_released else "parking"
+
+    def _hands_off_head(self, climate_id: str) -> bool:
+        """True when this head belongs to a released hands-off room."""
+        return any(
+            zone.climate_id == climate_id and self._hands_off_phase(zone) == "released"
+            for zone in self.zones
+        )
+
+    def _hands_off_vote(self, zone: Zone) -> str | None:
+        """What a released hands-off head is running, if it is heat or cool.
+
+        Before the off lands, the head's mode is ours or stale, so it has no
+        vote. Every other reported state (fan_only, dry, auto, heat_cool, off,
+        unavailable) asks nothing of the outdoor unit's direction.
+        """
+        if self._hands_off_phase(zone) != "released":
+            return None
+        head = self.hass.states.get(zone.climate_id)
+        if head is not None and head.state in (MODE_COOL, MODE_HEAT):
+            return head.state
+        return None
+
+    def restore_hands_off(self, slug: str) -> None:
+        """The enable switch restored a released hands-off room (see switch.py)."""
+        self._hands_off_released.add(slug)
+
+    def hands_off_released(self, slug: str) -> bool:
+        """Whether this room's park landed (what the enable switch persists)."""
+        return slug in self._hands_off_released
 
     # -- entity-driven mutations --------------------------------------------
     def zone_drift(self, zone: Zone) -> float:
