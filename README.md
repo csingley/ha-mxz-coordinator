@@ -713,16 +713,19 @@ With it on, when you disable that room (its switch, or its tile set to `off`):
   plan; disabling it again sends `off` again, until it lands.
 - MXZ cannot tell an `off` that never arrived from one someone undid a moment later,
   so the first `off` the head reports, with no other command of MXZ's still in
-  flight, ends the parking.
+  flight, ends the parking. That includes an `off` the head's integration reports for
+  a moment while it reconnects, if it does that.
 - The room tile stays `off`, because its mode is the room's coordinator switch:
-  turning the tile on still enables the room. Its action (and so Apple Home's
-  current state) shows what the head is doing: the head's own action if it reports
-  one, else heating, cooling, fan or drying from its mode.
+  turning the tile on still enables the room. Its action shows what the head is
+  doing: the head's own action if it reports one, else heating, cooling, fan or
+  drying from its mode. In Apple Home that is the current state; the target, and so
+  most likely the tile's label, stays Off.
 - If the head runs `heat` or `cool`, that counts in the shared direction, below every
   enabled room. It decides the direction only when no enabled room is calling or still
   running to its target, and a direction change it causes alone does not start the
   mode-change wait, so an enabled room that then calls the other way is not held back
-  by it. `sensor.*_plan` shows the head's vote in that room's `hands_off_vote` (its
+  by it. Once an enabled room runs in the direction it chose, the wait starts, just as
+  if that room had chosen it. `sensor.*_plan` shows the head's vote in that room's `hands_off_vote` (its
   `hands_off` reads `parking` or `released`), and `standoff` is true when it and
   another room want opposite modes.
 - A standby hold still holds this head too: at the hold's park mode, or `off` under
@@ -986,8 +989,9 @@ Want air moving instead? Choose **Fan only** in Configure → Fan and idle. See
 <summary><b>I want to run one room from its own remote</b></summary>
 
 Turn on **Hands-off when disabled** for that room in Configure → Rooms, then disable the
-room (its switch, or set its tile to `off`). MXZ turns the head off once and then leaves
-it alone until you enable the room again, across restarts too. Without that setting a
+room (its switch, or set its tile to `off`). MXZ turns the head off (and keeps trying
+until the head reports `off`), then leaves it alone until you enable the room again,
+across restarts too. Without that setting a
 disabled room's head is held off, and MXZ turns it back off whenever someone turns it on.
 See [Run one room from its own remote](#run-one-room-from-its-own-remote).
 

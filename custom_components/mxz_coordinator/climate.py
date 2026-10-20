@@ -226,8 +226,9 @@ class MXZRoomClimate(MXZEntity, CoordinatorEntity[MXZCoordinator], ClimateEntity
         HEATING. Only an engagement matching the plan's shared mode is active.
 
         A disabled hands-off room shows its head as it is: someone may be
-        running it on its own remote, and the tile (and Apple Home) must not
-        say off while it heats.
+        running it on its own remote, and the tile's action must not say off
+        while it heats. (hvac_mode stays OFF, so HomeKit's target state does
+        too; only its current state follows the head.)
         """
         if self._zone.hands_off and not self._enabled:
             return self._head_action()
