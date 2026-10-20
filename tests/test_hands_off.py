@@ -17,9 +17,13 @@ behavior that ships:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from homeassistant.components.climate import HVACAction, HVACMode
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import restore_state as rs
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
@@ -41,6 +45,7 @@ from custom_components.mxz_coordinator.const import (
     ZONE_SENSOR,
 )
 from custom_components.mxz_coordinator.logic import shared_mode_with_votes
+from tests.flow_pages import default, open_options_page, prefilled, submit
 from tests.test_drive import (
     SENSOR_A,
     SENSOR_B,
@@ -660,3 +665,41 @@ def test_vote_ranking_pure() -> None:
     # Non-heat/cool observations are no vote at all.
     for junk in ("fan_only", "dry", "auto", "heat_cool", "off", "unavailable", None):
         assert decide(["neutral", "off"], ["satisfied", "off"], [None, junk]) == ("cool", False)
+
+
+# ---------------------------------------------------------------------------
+# Configure > Rooms > room page
+# ---------------------------------------------------------------------------
+async def test_room_page_opts_one_room_in_and_out(hass: HomeAssistant) -> None:
+    """Off by default; on stores True on that room only; off removes the key."""
+    entry, _a, _b = await _setup(hass)
+    manager = hass.config_entries.options
+    before = [dict(zone) for zone in entry.data[CONF_ZONES]]
+    result = await open_options_page(hass, entry, "room_2")
+    assert default(result, "hands_off") is False
+    result = await submit(manager, result, {**prefilled(result), "hands_off": True})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert entry.data[CONF_ZONES] == [before[0], {**before[1], ZONE_HANDS_OFF: True}]
+    for store in (entry.data, entry.options):
+        assert not {"hands_off", "primary_hands_off", "secondary_hands_off"} & set(store)
+    assert [z.hands_off for z in entry.runtime_data.zones] == [False, True]
+
+    result = await open_options_page(hass, entry, "room_2")
+    assert default(result, "hands_off") is True
+    result = await submit(manager, result, {**prefilled(result), "hands_off": False})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert entry.data[CONF_ZONES] == before
+    assert [z.hands_off for z in entry.runtime_data.zones] == [False, False]
+
+
+def test_room_page_copy_is_translated() -> None:
+    """The field has a label and a description in strings.json and en.json alike."""
+    root = Path("custom_components/mxz_coordinator")
+    copies = []
+    for path in (root / "strings.json", root / "translations/en.json"):
+        room = json.loads(path.read_text())["options"]["step"]["room"]
+        copies.append((room["data"]["hands_off"], room["data_description"]["hands_off"]))
+    assert copies[0] == copies[1]
+    assert copies[0][0] and "own remote" in copies[0][1]

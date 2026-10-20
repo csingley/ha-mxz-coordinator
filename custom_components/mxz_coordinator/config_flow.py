@@ -77,6 +77,7 @@ from .const import (
     ZONE_CLIMATE,
     ZONE_ENTITY_SUFFIXES,
     ZONE_EVIDENCE_BASIS,
+    ZONE_HANDS_OFF,
     ZONE_MAX_AGE,
     ZONE_NAME,
     ZONE_REPORT_INTERVAL,
@@ -552,6 +553,9 @@ _ROOM_WIRING_FIELDS = (
     ("vane_vertical", ZONE_VANE_VERTICAL),
     ("vane_horizontal", ZONE_VANE_HORIZONTAL),
 )
+# The room page's hands-off opt-in (flow key); stored as ZONE_HANDS_OFF only
+# when on, so an opted-out room's record is exactly what it was before 3.6.0.
+_HANDS_OFF_FIELD = "hands_off"
 _FRESHNESS_ZONE_FIELDS = (
     ("report_interval", ZONE_REPORT_INTERVAL),
     ("max_age", ZONE_MAX_AGE),
@@ -626,6 +630,7 @@ def _flow_only_keys() -> frozenset[str]:
     would shadow it in the coordinator's {**data, **options} merge.
     """
     room_keys = {key for key, _ in _ROOM_WIRING_FIELDS + _FRESHNESS_ZONE_FIELDS}
+    room_keys.add(_HANDS_OFF_FIELD)
     section_keys = {key for _, groups in _PAGES.values() for key in groups}
     slot_keys = {
         f"{zone_slug(index)}_{key}"
@@ -719,6 +724,7 @@ def _page_form(
 def _room_view(zone: dict[str, Any]) -> dict[str, Any]:
     """A stored zone as the room page's field values."""
     view = {key: zone.get(zone_key) for key, zone_key in _ROOM_WIRING_FIELDS}
+    view[_HANDS_OFF_FIELD] = zone.get(ZONE_HANDS_OFF) is True
     view.update(_zone_freshness_profile(zone))
     return view
 
@@ -765,6 +771,9 @@ def _room_schema(view: dict[str, Any], expanded: bool = False) -> vol.Schema:
                 "vane_horizontal",
                 description={"suggested_value": view.get("vane_horizontal")},
             ): _VANE_SELECTOR,
+            vol.Optional(
+                _HANDS_OFF_FIELD, default=view.get(_HANDS_OFF_FIELD) is True
+            ): selector.BooleanSelector(),
             vol.Required(_FRESHNESS_SECTION): section(
                 vol.Schema(freshness), {"collapsed": not expanded}
             ),
@@ -2247,7 +2256,7 @@ class MXZOptionsFlow(OptionsFlow):
     async def async_step_room(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """One room's vanes, airflow sensor and sensor freshness.
+        """One room's vanes, airflow sensor, hands-off opt-in and sensor freshness.
 
         These are flow-input only: they fold into this room's record in the
         zones list, never into flat keys (a stale flat key would shadow the
@@ -2298,6 +2307,10 @@ class MXZOptionsFlow(OptionsFlow):
                 zone[zone_key] = value
             else:
                 zone.pop(zone_key, None)
+        if values.get(_HANDS_OFF_FIELD) is True:
+            zone[ZONE_HANDS_OFF] = True
+        else:
+            zone.pop(ZONE_HANDS_OFF, None)
         # A complete all-empty profile is an explicit return to unknown
         # cadence. Otherwise preserve the submitted values byte-for-byte under
         # M36's existing zone keys.

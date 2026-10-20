@@ -460,10 +460,12 @@
         "data": {
           "stage": "Airflow sensor",
           "vane_vertical": "Vertical vane",
-          "vane_horizontal": "Horizontal vane"
+          "vane_horizontal": "Horizontal vane",
+          "hands_off": "Hands-off when disabled"
         },
         "data_description": {
-          "stage": "Shows the head's real fan speed while the fan is on auto."
+          "stage": "Shows the head's real fan speed while the fan is on auto.",
+          "hands_off": "Off keeps a disabled room's head off. On turns it off once when you disable the room, then leaves it alone until you enable it again, so it can run from its own remote."
         },
         "sections": {
           "freshness": {

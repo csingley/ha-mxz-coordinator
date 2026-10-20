@@ -58,6 +58,7 @@ ROOM_FIELDS: tuple[str, ...] = (
     "stage",
     "vane_vertical",
     "vane_horizontal",
+    "hands_off",
     *SECTION_FIELDS["freshness"],
 )
 GLOBAL_PAGES = tuple(PAGE_FIELDS)
