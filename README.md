@@ -733,9 +733,15 @@ With it on, when you disable that room (its switch, or its tile set to `off`):
   running to its target, and a direction change it causes alone does not start the
   mode-change wait, so an enabled room that then calls the other way is not held back
   by it. Once an enabled room runs in the direction it chose, the wait starts, just as
-  if that room had chosen it. `sensor.*_plan` shows the head's vote in that room's `hands_off_vote` (its
-  `hands_off` reads `parking` or `released`), and `standoff` is true when it and
-  another room want opposite modes.
+  if that room had chosen it. `sensor.*_plan` shows the head's vote in that room's
+  `hands_off_vote` (its `hands_off` reads `parking` or `released`), and `standoff` is
+  true when it and another room want opposite modes. The plan's top-level
+  `mode_by_hands_off` is true when the vote, not an enabled room, set the shared mode
+  on that update: no enabled room is calling and the vote picks a mode the enabled
+  rooms alone would not, or the mode goes back after the vote ends. Such a change
+  starts no mode-change wait. With **Resting mode** set to Cool or Heat it stays true
+  while the vote holds the mode away from rest; on Last used it is true only on the
+  update that makes the change. With no room opted in it is always false.
 - A standby hold still holds this head too: at the hold's park mode, or `off` under
   an `eco` hold, for as long as the hold lasts. Afterwards the head is left alone
   again. MXZ does not "heal" this head out of `dry` or `auto`.
@@ -896,6 +902,7 @@ refer to priority slots, not permanent room identities.
 | Observation | Meaning and next step |
 | --- | --- |
 | `standoff`, demand/engage, mode dwell | Another room's priority or dwell may be holding the direction. Check targets and priority before changing a raw head. |
+| `mode_by_hands_off`, room `hands_off_vote` | True when a disabled room run from its own remote set the shared mode, with no enabled room calling; that change starts no mode-change wait. Always false with no room opted in. See [Run one room from its own remote](#run-one-room-from-its-own-remote). |
 | `inhibited`, room enable, lockouts, eco | A configured gate may be parking the room. Check the controlling switch/input. |
 | `sensor_health`, `sensor_age`, `sensors_ok` | Check validity and the freshness contract. Age of an HA write can differ from age of a sample. |
 | `fan_hold`, `control_reasons` | Check ownership, capability, restore and settings warnings with their suggested next step. |

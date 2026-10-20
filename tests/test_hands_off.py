@@ -669,6 +669,73 @@ async def test_return_to_rest_after_a_vote_starts_no_dwell(hass: HomeAssistant) 
     assert coord._last_mode_change_ts > 0.0  # an enabled room's flip is stamped
 
 
+async def test_plan_shows_mode_by_hands_off(hass: HomeAssistant) -> None:
+    """``mode_by_hands_off`` on the plan sensor is true on the plan whose mode
+    the vote changed, false once nothing changes, and false again when an
+    enabled room calling decides the mode."""
+    entry, _a, head_b = await _setup(
+        hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
+        hysteresis=None,
+    )
+    coord = entry.runtime_data
+    await _recompute(hass, entry)  # park lands
+    assert _plan(hass, entry).attributes["mode_by_hands_off"] is False
+    coord._last_mode_change_ts = 0.0
+    await _remote(hass, head_b, "heat")
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, plan.attributes["mode_by_hands_off"]) == ("heat", True)
+    # Without a resting mode the vote now matches the plan: no change, false.
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, plan.attributes["mode_by_hands_off"]) == ("heat", False)
+    # The enabled primary needs cooling: it decides, so false.
+    await _set_temp(hass, SENSOR_A, 76)
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, plan.attributes["mode_by_hands_off"]) == ("cool", False)
+
+
+async def test_plan_shows_mode_by_hands_off_through_the_undo(hass: HomeAssistant) -> None:
+    """With a resting mode, true while the vote holds the mode away from rest
+    and on the plan going back to rest when the head stops; false after."""
+    entry, _a, head_b = await _setup(
+        hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
+        hysteresis=None, **{CONF_RESTING_MODE_BIAS: "cool"},
+    )
+    coord = entry.runtime_data
+    await _recompute(hass, entry)
+    coord._last_mode_change_ts = 0.0
+    await _remote(hass, head_b, "heat")
+    seen = []
+    for _ in range(2):
+        await _recompute(hass, entry)
+        plan = _plan(hass, entry)
+        seen.append((plan.state, plan.attributes["mode_by_hands_off"]))
+    await _remote(hass, head_b, "off")
+    for _ in range(2):
+        await _recompute(hass, entry)
+        plan = _plan(hass, entry)
+        seen.append((plan.state, plan.attributes["mode_by_hands_off"]))
+    assert seen == [("heat", True), ("heat", True), ("cool", True), ("cool", False)]
+
+
+async def test_opted_out_plan_shows_mode_by_hands_off_false(hass: HomeAssistant) -> None:
+    """An install with no room opted in shows the attribute, always false."""
+    entry, head_a, _b = await _setup(
+        hass, enable=("_primary_enable", "_coordinator_enable"), hysteresis=None,
+    )
+    await _recompute(hass, entry)
+    entry.runtime_data._last_mode_change_ts = 0.0
+    seen = [_plan(hass, entry).attributes["mode_by_hands_off"]]
+    await _set_temp(hass, SENSOR_A, 64)  # the primary needs heat: a real flip
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a)) == ("heat", "heat")
+    seen.append(plan.attributes["mode_by_hands_off"])
+    assert seen == [False, False]
+
+
 async def _cool_then_heat_at_rest(hass: HomeAssistant, entry, head_a: str) -> float:
     """The enabled primary runs cool at the resting mode, then needs heat
     seconds later. Returns the dwell clock as it stood after the cool run."""

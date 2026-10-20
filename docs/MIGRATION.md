@@ -19,6 +19,13 @@ entry was created) parks the head again, as a newly disabled room does. On a rol
 to a release without this setting, the `hands_off` key is ignored and every disabled
 room is held off again; that was checked by reading the older code, not run.
 
+The plan sensor gains a top-level `mode_by_hands_off` attribute, and each room in its
+`zones` list gains `hands_off` (`parking`, `released` or `null`) and `hands_off_vote`
+(`heat`, `cool` or `null`). `mode_by_hands_off` is true when an opted-in room's vote,
+not an enabled room, set the shared mode on that update (or the mode went back after
+the vote ended), with no enabled room calling; such a change starts no mode-change
+wait. On an install with no room opted in it is always false.
+
 See [Run one room from its own remote](../README.md#run-one-room-from-its-own-remote).
 
 ## Idle action default (3.5.0)

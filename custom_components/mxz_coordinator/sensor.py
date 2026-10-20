@@ -26,6 +26,7 @@ _ATTRS = (
     "secondary_engage",
     "zones",
     "standoff",
+    "mode_by_hands_off",
     "sensors_ok",
     "seconds_since_mode_change",
     "mode_change_allowed",
