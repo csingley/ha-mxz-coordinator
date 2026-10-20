@@ -1697,12 +1697,16 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # caused, so it starts no dwell (see shared_mode_with_votes). Once a
         # coordinated room runs in that mode, the mode is ours: stamp it then,
         # as if that room had flipped it, so the next reversal is dwelled.
+        # The vote's undoing (back to the resting bias) starts no dwell either,
+        # but leaves a mode that owes the vote nothing: a run there is no flip.
         if selection_seq != self._selection_seq:
             return
         if state != self.current_shared_mode:
             self.current_shared_mode = state
-            self._mode_by_votes = bool(plan.get("mode_by_hands_off"))
-            if not self._mode_by_votes:
+            self._mode_by_votes = (
+                bool(plan.get("mode_by_hands_off")) and state != self._resting_bias()
+            )
+            if not plan.get("mode_by_hands_off"):
                 self._last_mode_change_ts = dt_util.utcnow().timestamp()
             self.async_update_listeners()  # let the shared-mode select re-render
         elif self._mode_by_votes and state in (

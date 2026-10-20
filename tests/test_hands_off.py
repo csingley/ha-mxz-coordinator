@@ -669,6 +669,55 @@ async def test_return_to_rest_after_a_vote_starts_no_dwell(hass: HomeAssistant) 
     assert coord._last_mode_change_ts > 0.0  # an enabled room's flip is stamped
 
 
+async def _cool_then_heat_at_rest(hass: HomeAssistant, entry, head_a: str) -> float:
+    """The enabled primary runs cool at the resting mode, then needs heat
+    seconds later. Returns the dwell clock as it stood after the cool run."""
+    coord = entry.runtime_data
+    await _set_temp(hass, SENSOR_A, 76)
+    await _recompute(hass, entry)
+    assert _s(hass, head_a) == "cool"
+    stamped = coord._last_mode_change_ts
+    await _set_temp(hass, SENSOR_A, 64)
+    await _recompute(hass, entry)
+    return stamped
+
+
+async def test_opted_out_run_at_rest_starts_no_dwell(hass: HomeAssistant) -> None:
+    """The base the next test is held to: an enabled run in the mode already
+    set is no flip, so a reversal seconds later is not held."""
+    entry, head_a, _b = await _setup(
+        hass, enable=("_primary_enable", "_coordinator_enable"), hysteresis=None,
+        **{CONF_RESTING_MODE_BIAS: "cool"},
+    )
+    await _recompute(hass, entry)
+    entry.runtime_data._last_mode_change_ts = 0.0
+    assert await _cool_then_heat_at_rest(hass, entry, head_a) == 0.0
+    assert _plan(hass, entry).state == "heat"
+    assert _s(hass, head_a) == "heat"
+
+
+async def test_run_at_rest_after_a_vote_undo_starts_no_dwell(hass: HomeAssistant) -> None:
+    """Back at rest after the vote's undoing, the mode owes nothing to the
+    vote: an enabled run there is the base case above, not a flip to stamp."""
+    entry, head_a, head_b = await _setup(
+        hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
+        hysteresis=None, **{CONF_RESTING_MODE_BIAS: "cool"},
+    )
+    coord = entry.runtime_data
+    await _recompute(hass, entry)  # park lands
+    coord._last_mode_change_ts = 0.0
+    await _remote(hass, head_b, "heat")
+    await _recompute(hass, entry)
+    assert _plan(hass, entry).state == "heat"
+    await _remote(hass, head_b, "off")  # the vote ends
+    await _recompute(hass, entry)
+    assert _plan(hass, entry).state == "cool"
+    assert coord._mode_by_votes is False
+    assert await _cool_then_heat_at_rest(hass, entry, head_a) == 0.0
+    assert _plan(hass, entry).state == "heat"
+    assert _s(hass, head_a) == "heat"
+
+
 async def test_enabled_run_in_the_voted_mode_stamps_the_dwell(hass: HomeAssistant) -> None:
     """The vote picked heat (no stamp); an enabled room then runs heat in it.
     The compressor now heats for a room we coordinate, so the next reversal
