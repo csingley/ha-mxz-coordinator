@@ -63,7 +63,7 @@ Use [Reconfigure](#reconfigure-heads-rooms-and-sensors) to change the room list 
 
 - [What it does](#what-it-does), and
   [the problem it solves](#the-problem-stock-auto-starves-rooms)
-- [What's new in 3.7.0](#whats-new-in-370)
+- [What's new in 3.7.1](#whats-new-in-371)
 - [Before you install](#before-you-install) · [Install](#install)
 - [Set up your outdoor unit](#set-up-your-outdoor-unit) ·
   [If setup stops or warns](#if-setup-stops-or-warns)
@@ -149,9 +149,35 @@ supported hardware and setup apply. It is not tested for parity with this integr
 
 </details>
 
-## What's new in 3.7.0
+## What's new in 3.7.1
 
-Released October 21, 2026.
+3.7.1 is not released yet.
+
+- **The mode-change wait runs on a monotonic clock.** The wait between heat and cool
+  is now timed by a clock that only counts forward, not by the time of day. A jump
+  in the host's clock, from an NTP correction or a clock set by hand, can no longer
+  cut the wait short or stretch it. Time the host spends suspended doesn't count
+  toward the wait, so a wait under way when it suspends finishes after it resumes.
+  The wait's length and every setting are unchanged, and after a restart the full
+  wait applies, as before. By
+  [@csingley](https://github.com/csingley) in
+  [#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32). See
+  [Mode-change wait on a monotonic clock (3.7.1)](docs/MIGRATION.md#mode-change-wait-on-a-monotonic-clock-371).
+- **The coil-drying wait and the floor's own timers run on the same clock.** Three more
+  waits now count on that monotonic clock: the coil-drying wait of Off after drying, a
+  freeze floor or overheat ceiling's two hours of driving before it stalls, and the
+  limit of one floor notice per room per hour. A clock jump can no longer end any of
+  them early or hold it late, and time the host spends suspended doesn't count toward
+  them. So a clock that jumps forward at boot (a host without a battery clock) no
+  longer makes a running floor look stalled, and after a suspend a floor stall or a
+  held-back floor notice can come later by the clock on the wall. No setting changes, and each behaves as before across a restart. A floor's
+  re-arm after a person takes the head back stays on the time of day, because it is
+  saved across a restart and shown as a time. These follow-on changes were made for
+  this release on the pattern of #32; they are not part of #32. See
+  [Coil-drying wait and floor timers on a monotonic clock (3.7.1)](docs/MIGRATION.md#coil-drying-wait-and-floor-timers-on-a-monotonic-clock-371).
+- 3.7.1 has not been tested on hardware.
+
+From 3.7.0:
 
 - **Safety priority.** A new, optional per-room setting in Configure → Rooms → (room):
   a binary sensor. While it reads `on`, that room's own heat or cool want outranks
@@ -1466,7 +1492,12 @@ invented entities; it covers software behavior, not physical behavior on equipme
 
 Cutting a release? Follow [docs/RELEASING.md](docs/RELEASING.md).
 
-- The first three locks belong to the existing CI lanes.
+- The first three locks belong to the existing CI lanes. Each lane, and the .10
+  qualification, also runs the full suite a second time with `-p tools.fakeboot` and
+  `FAKE_UPTIME=120`, on a clock that reads as if the runner had booted two minutes ago.
+  The mode-change wait, the coil-dry wait and the floor's own clocks are timed on the
+  monotonic clock, which counts from boot, so a test that only passes on a long-running
+  host fails there.
 - The .10 recipe uses public immutable core/plugin inputs, a pinned Python archive and
   actual locally built artifact hashes. Public plugin `0.13.370` requires beta4;
   installing it by version alone does not reproduce the stable .10 environment.
@@ -1500,6 +1531,8 @@ python3.12 -m venv "$work/venv"
   requirements/constraints-py312-ha2024.12.0.txt \
   0d0031ddca8bb870560ca4d4bcafd34233e23e9dd6f0470dc31f7bd888eb7403 3.12.14
 "$work/venv/bin/python" -m pytest -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
+FAKE_UPTIME=120 "$work/venv/bin/python" -m pytest -p tools.fakeboot -p tools.pytest_phases \
+  tests/ -q -s -p no:cacheprovider
 "$work/venv/bin/ruff" check --no-cache custom_components/ tests/ tools/
 ```
 
@@ -1537,7 +1570,7 @@ MXZ Coordinator got this good because people ran it on their own systems, found 
 - [@helicopterrun](https://github.com/helicopterrun) validated it on 3-zone hardware and did relentless, root-caused QA through the v3 beta ([#4](https://github.com/dkpnw/ha-mxz-coordinator/issues/4), [#5](https://github.com/dkpnw/ha-mxz-coordinator/issues/5), [#6](https://github.com/dkpnw/ha-mxz-coordinator/issues/6), [#7](https://github.com/dkpnw/ha-mxz-coordinator/issues/7)). Those reports led to the removal docs, single-setpoint head support and entry-scoped restore.
 - [@oliverbrandmueller](https://github.com/oliverbrandmueller) asked for metric units ([#2](https://github.com/dkpnw/ha-mxz-coordinator/issues/2)). Since 2.8.0 the coordinator runs in your Home Assistant temperature unit from end to end.
 - **mw1029** on the [Home Assistant forum](https://community.home-assistant.io/t/1018382) tried MXZ with the cloud-based `comfort_HA` integration and posted both entity dumps, which showed exactly where the two don't line up. Support for it is in progress.
-- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author, and he tested it on his own 4-zone MXZ-4C36NA2 before release. It shipped in 3.6.0. He then designed and wrote the safety-priority arbitration ([#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31)): every room's heat or cool want ranked in one priority order, with an optional per-room **Safety priority** sensor that lifts a room's own want above every other room's. It shipped in 3.7.0, not yet tested on hardware. The 3.7.0 freeze floor and overheat ceiling build on his safety tier: a tripped floor or ceiling is one more want in that same priority order, with the freeze floor ranked first. He has also sent [#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32), which times the mode-change wait with a monotonic clock so a wall-clock jump (an NTP correction, a suspend and resume) can't shorten or stretch it. It is in progress.
+- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author, and he tested it on his own 4-zone MXZ-4C36NA2 before release. It shipped in 3.6.0. He then designed and wrote the safety-priority arbitration ([#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31)): every room's heat or cool want ranked in one priority order, with an optional per-room **Safety priority** sensor that lifts a room's own want above every other room's. It shipped in 3.7.0, not yet tested on hardware. The 3.7.0 freeze floor and overheat ceiling build on his safety tier: a tripped floor or ceiling is one more want in that same priority order, with the freeze floor ranked first. He also wrote [#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32), which times the mode-change wait with a monotonic clock so a wall-clock jump (an NTP correction, a clock set by hand) can't shorten or stretch it. It is set for 3.7.1, which is not released yet.
 
 **Prior art and references**
 

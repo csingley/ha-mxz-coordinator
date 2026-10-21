@@ -44,9 +44,17 @@ The first command tests infrastructure controls with invented fixtures and plugi
 autoload disabled. Ordinary integration tests retain genuine plugin loading:
 
 ```bash
-timeout --signal=TERM --kill-after=5s 180s "$work/venv/bin/python" -m pytest \
+timeout --signal=TERM --kill-after=5s 300s "$work/venv/bin/python" -m pytest \
   -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
+FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 300s "$work/venv/bin/python" -m pytest \
+  -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
 ```
+
+The second run is the same suite on a clock that reads as if the host had booted
+two minutes ago (`tools/fakeboot.py`); it prints `FAKEBOOT_UPTIME=120` once. The
+hosted qualification runs both and exports both logs. Each has 300 s, as in the
+original CI: 3.7.1's 1,969 tests took 110 s on one hosted runner and were
+still passing at 180 s on two slower ones (about 2× per test).
 
 Do not interpret a collection, import, sentinel, or partial log as a full pass.
 For release qualification, settle the implementation, version, documentation and
@@ -140,6 +148,9 @@ runners, reruns, tags, unsupported events, and the existing dedicated diagnostic
 branches. Checkout credentials are not persisted. The source SHA/tree and all
 tracked file hashes are recorded, followed by actual artifact/build/runtime
 receipts. Sentinel and full-suite exits are saved independently of export.
+A failed or timed-out full suite or fresh-boot pass also prints the last 200
+lines of its own log in its own step, with the step's exit unchanged; the export
+prints every log whole. As in the existing CI, nothing is uploaded as an artifact.
 Complete ordinary phases and bounded complete logs are required; missing,
 skipped, failed, malformed, or oversize evidence fails visibly. Existing CI
 continues to own its five job families and three earlier targets.

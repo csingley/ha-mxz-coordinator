@@ -10,10 +10,13 @@ A release is cut by hand, in this order. Don't tag until every step above the ta
 
    ```bash
    python -m pytest -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
+   FAKE_UPTIME=120 python -m pytest -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
    ruff check --no-cache custom_components/ tests/ tools/
    ```
 
-   The suite must end `PHASES_VALID=true` with exit 0, and ruff must report no errors.
+   Both suite runs must end `PHASES_VALID=true` with exit 0, and ruff must report no
+   errors. The second runs on a clock that reads as if the host had booted 120 s ago
+   (`tools/fakeboot.py`) and prints `FAKEBOOT_UPTIME=120` once.
    CI pins `ruff==0.16.0`.
 3. **CI green on main.** Push the release commit to `main` and wait until every job in
    `CI` and `HA 2026.10 qualification` passes on that exact commit.
@@ -29,8 +32,11 @@ A release is cut by hand, in this order. Don't tag until every step above the ta
    author (closed or merged since the tag) and marks each as credited or MISSING. It
    skips the owner, agents and bots. It exits 0 when everyone is credited, 1 when
    anyone is missing and 2 on a git, `gh` or README error. A commit whose email has no
-   GitHub account shows up as `name <email>`. Find out who wrote it before you credit
-   them.
+   GitHub account shows up as `name <email>`. A co-author's email is matched to a login
+   by its GitHub noreply form, the small map in `tools/credits_check.py`
+   (`KNOWN_LOGINS`), or a commit of their own in the range; one that none of these
+   matches shows up as `name <email>` too. Find out who wrote it before you credit
+   them, and add their email to the map only once you know their login.
 
    For every MISSING contributor, add them to the README's
    [Credits & prior art](../README.md#credits--prior-art) section:

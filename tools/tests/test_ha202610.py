@@ -4,6 +4,8 @@ import copy
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -203,7 +205,7 @@ def test_additional_workflow_permissions_and_ordinary_execution():
     assert actions == [{"uses": "actions/checkout@v4", "with": {"persist-credentials": "false"}}]
     assert job["steps"][-1]["if"] == "always()"
     script = (ROOT / "tools/ci-ha202610.sh").read_text()
-    assert "args=(180s tests/)" in script
+    assert "args=(300s tests/)" in script
     assert "-p tools.pytest_phases" in script
     assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in script
     assert "--no-deps" not in (ROOT / "tools/ha202610.py").read_text()
@@ -249,3 +251,208 @@ def test_foreign_interpreter_refused_before_install(tmp_path):
     wrapper.write_text("#!/bin/sh\nexec /invented/private/python \"$@\"\n")
     with pytest.raises(ValueError, match="wrong owned Python wrapper"):
         lane.check_runtime_wrapper(tmp_path, lane.load_bundle())
+
+
+FRESH_BOOT_STEP = {"name": "Full suite on a fresh-boot clock", "if": "${{ !cancelled() }}",
+                   "run": "bash tools/ci-ha202610.sh fakeboot"}
+
+
+def test_fresh_boot_pass_follows_the_suite_and_precedes_the_export():
+    steps = workflow()["jobs"]["exact-ha202610"]["steps"]
+    names = [step.get("name") for step in steps]
+    assert names.count(FRESH_BOOT_STEP["name"]) == 1
+    fresh = names.index(FRESH_BOOT_STEP["name"])
+    assert names[fresh - 1] == "Full retained suite with original phases"
+    assert steps[fresh - 1]["run"] == "bash tools/ci-ha202610.sh suite"
+    assert steps[fresh] == FRESH_BOOT_STEP
+    assert fresh == len(steps) - 2 and steps[-1]["run"] == "bash tools/ci-ha202610.sh export"
+
+
+def script_branch(case):
+    script = (ROOT / "tools/ci-ha202610.sh").read_text()
+    head = "\n  " + case + ")\n"
+    assert script.count(head) == 1
+    return script.split(head, 1)[1].split("\n    ;;\n", 1)[0]
+
+
+def fakeboot_branch():
+    return script_branch("fakeboot")
+
+
+def test_fresh_boot_pass_is_the_full_suite_on_the_two_minute_clock():
+    branch = fakeboot_branch()
+    assert ('FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 300s "$python" -m pytest \\\n'
+            '      -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider'
+            ' > "$root/fakeboot.log" 2>&1 || result=$?') in branch
+    assert "printf '%s\\n' \"$result\" > \"$root/fakeboot.exit\"" in branch
+    assert branch.rstrip().endswith('exit "$result"')
+
+
+@pytest.mark.parametrize("status", [0, 1, 2, 124, 137])
+def test_fresh_boot_exit_is_saved_and_returned(tmp_path, status):
+    """Run the script's own fakeboot branch against an invented interpreter that
+    reports its arguments and clock, then exits with ``status``."""
+    stub = tmp_path / "invented-python"
+    stub.write_text('#!/bin/bash\nprintf "ARGV %s\\n" "$*"\nprintf "FAKE_UPTIME=%s\\n" "$FAKE_UPTIME"\n'
+                    f"exit {status}\n")
+    stub.chmod(0o755)
+    root = tmp_path / "invented-root"
+    root.mkdir()
+    result = subprocess.run(["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c",
+                             f'python={stub}; root={root}\n' + fakeboot_branch()],
+                            env={"PATH": os.defpath}, text=True, capture_output=True, check=False, timeout=10)
+    assert result.returncode == status
+    assert (root / "fakeboot.exit").read_text() == f"{status}\n"
+    assert (root / "fakeboot.log").read_text().splitlines() == [
+        "ARGV -m pytest -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider",
+        "FAKE_UPTIME=120"]
+    # A short failed log is shown whole in the step; a passing one is not shown.
+    assert result.stdout == ("" if status == 0 else (root / "fakeboot.log").read_text())
+    assert result.stderr == ""
+
+
+def test_fresh_boot_clock_line():
+    assert lane.fakeboot_clock_errors("FAKEBOOT_UPTIME=120\n" + phase_fixture()) == []
+
+
+@pytest.mark.parametrize("raw", ["", "FAKEBOOT_UPTIME=86400\n", "FAKEBOOT_UPTIME=120\nFAKEBOOT_UPTIME=120\n",
+                                 "FAKEBOOT_UPTIME=120.0\n", "FAKEBOOT_UPTIME=120 \n"],
+                         ids=["missing", "wrong", "repeated", "reformatted", "trailing"])
+def test_missing_or_wrong_fresh_boot_clock_refused(raw):
+    assert lane.fakeboot_clock_errors(raw + phase_fixture()) == ["missing, repeated or wrong fresh-boot clock"]
+
+
+def export_errors(root, capsys):
+    with pytest.raises(ValueError, match="incomplete evidence export"):
+        lane.export(root, lane.load_bundle())
+    line = [x for x in capsys.readouterr().out.splitlines() if x.startswith("EVIDENCE_ERRORS ")]
+    assert len(line) == 1
+    return json.loads(line[0][len("EVIDENCE_ERRORS "):])
+
+
+@pytest.mark.parametrize("fault", ["none", "no-log", "no-exit", "exit", "phases", "clock", "oversize"])
+def test_export_requires_complete_fresh_boot_evidence(tmp_path, capsys, fault):
+    """Only the fresh-boot files are present, so every error that is not about a
+    missing file of another step is about them."""
+    log, status = "FAKEBOOT_UPTIME=120\n" + phase_fixture(), "0\n"
+    if fault == "exit":
+        status = "1\n"
+    elif fault == "phases":
+        log = log.replace("PHASES_VALID=true", "PHASES_VALID=false")
+    elif fault == "clock":
+        log = log.replace("FAKEBOOT_UPTIME=120", "FAKEBOOT_UPTIME=86400")
+    elif fault == "oversize":
+        log += "x" * (5 * 2**20)
+    if fault != "no-log":
+        (tmp_path / "fakeboot.log").write_text(log)
+    if fault != "no-exit":
+        (tmp_path / "fakeboot.exit").write_text(status)
+    others = {"missing " + name for name in (
+        "source.txt", "source-files.sha256", "runner.txt", "setup.log", "checks.log",
+        "generated-artifact.json", "actual-artifacts.json", "install.lock", "wheel-tags.json",
+        "sentinel.log", "sentinel.exit", "suite.log", "suite.exit")}
+    errors = [e for e in export_errors(tmp_path, capsys)
+              if e not in others and not e.startswith("invalid setup receipt ")]
+    expected = {
+        "none": [],
+        "no-log": ["missing fakeboot.log"],
+        "no-exit": ["missing fakeboot.exit"],
+        "exit": ["nonzero or missing suite exit"],
+        "phases": ["incomplete phase completion"],
+        "clock": ["missing, repeated or wrong fresh-boot clock"],
+        "oversize": ["oversize or symlink " + str(tmp_path / "fakeboot.log")],
+    }[fault]
+    assert errors == expected
+
+
+def test_both_full_suite_passes_have_the_same_300_second_limit():
+    script = (ROOT / "tools/ci-ha202610.sh").read_text()
+    assert re.findall(r"args=\((\d+)s ", script) == ["60", "300"]
+    assert re.findall(r"--kill-after=5s (\d+)s ", script) == ["300"]
+    assert "args=(300s tests/)" in script and "180s" not in script
+
+
+INVENTED_LINES = "".join(f"INVENTED LINE {i}\n" for i in range(1, 251))
+
+
+def run_branch(tmp_path, case, ending, mode=None, limit=None, path=os.defpath):
+    """Run one of the script's own branches against an invented interpreter that
+    writes its arguments and 250 numbered lines, then ends with ``ending``."""
+    stub = tmp_path / "invented-python"
+    stub.write_text('#!/bin/bash\nprintf "ARGV %s\\n" "$*"\n'
+                    'for ((i = 1; i <= 250; i++)); do printf "INVENTED LINE %s\\n" "$i"; done\n' + ending + "\n")
+    stub.chmod(0o755)
+    root = tmp_path / "invented-root"
+    root.mkdir()
+    branch = script_branch(case)
+    if limit:
+        # A unit fixture: a short limit stands in for 300 s so a real timeout fires.
+        assert branch.count("300s") == 1
+        branch = branch.replace("300s", limit)
+    prefix = f"python={stub}; root={root}\n" + (f"mode={mode}\n" if mode else "")
+    result = subprocess.run(["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", prefix + branch],
+                            env={"PATH": path}, text=True, capture_output=True, check=False, timeout=30)
+    return result, root
+
+
+FULL_PASSES = [("sentinel|suite", "suite", "suite"), ("fakeboot", None, "fakeboot")]
+
+
+@pytest.mark.parametrize("case,mode,name", FULL_PASSES, ids=["suite", "fakeboot"])
+@pytest.mark.parametrize("ending,status", [("exit 1", 1), ("exit 2", 2), ("exec sleep 30", 124), ("exit 137", 137)],
+                         ids=["failed", "interrupted", "timeout", "killed"])
+def test_failed_or_timed_out_pass_prints_the_tail_of_its_own_log(tmp_path, case, mode, name, ending, status):
+    result, root = run_branch(tmp_path, case, ending, mode, limit="1s" if status == 124 else None)
+    assert result.returncode == status
+    assert (root / (name + ".exit")).read_text() == f"{status}\n"
+    log = (root / (name + ".log")).read_text()
+    assert log.startswith("ARGV -m pytest ") and log.endswith(INVENTED_LINES)
+    # Exactly the last 200 of the 251 lines, and nothing else on either stream.
+    assert result.stdout == "".join(f"INVENTED LINE {i}\n" for i in range(51, 251))
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("case,mode,name", FULL_PASSES, ids=["suite", "fakeboot"])
+def test_a_passing_pass_prints_nothing(tmp_path, case, mode, name):
+    result, root = run_branch(tmp_path, case, "exit 0", mode)
+    assert result.returncode == 0 and (root / (name + ".exit")).read_text() == "0\n"
+    assert (root / (name + ".log")).read_text().endswith(INVENTED_LINES)
+    assert result.stdout == "" and result.stderr == ""
+
+
+def test_a_failed_sentinel_prints_nothing(tmp_path):
+    result, root = run_branch(tmp_path, "sentinel|suite", "exit 1", "sentinel")
+    assert result.returncode == 1 and (root / "sentinel.exit").read_text() == "1\n"
+    assert (root / "sentinel.log").read_text().endswith(INVENTED_LINES)
+    assert result.stdout == "" and result.stderr == ""
+
+
+@pytest.mark.parametrize("case,mode,name", FULL_PASSES, ids=["suite", "fakeboot"])
+def test_a_failing_tail_cannot_change_the_exit(tmp_path, case, mode, name):
+    tools = tmp_path / "invented-bin"
+    tools.mkdir()
+    # Only the shell and timeout are on PATH, so the tail itself fails.
+    for tool in ("bash", "timeout"):
+        (tools / tool).symlink_to(shutil.which(tool, path=os.defpath))
+    result, root = run_branch(tmp_path, case, "exit 1", mode, path=str(tools))
+    assert result.returncode == 1 and (root / (name + ".exit")).read_text() == "1\n"
+    assert "tail" in result.stderr and result.stdout == ""
+
+
+def uploads(wf):
+    """As in ci.yml's contract, no job of this workflow uploads an artifact."""
+    return [s for job in wf["jobs"].values() for s in job.get("steps", []) if "upload-artifact" in s.get("uses", "")]
+
+
+def test_no_artifact_upload_as_in_the_original_ci():
+    assert uploads(workflow()) == []
+    assert "upload-artifact" not in (ROOT / ".github/workflows/ci-ha2026.10.yml").read_text()
+
+
+@pytest.mark.parametrize("job,uses", [("exact-ha202610", "actions/upload-artifact@v4"),
+                                      ("exact-ha202610", "actions/upload-artifact@v7"),
+                                      ("approval", "actions/upload-artifact@v4")])
+def test_an_added_upload_is_refused(job, uses):
+    wf = copy.deepcopy(workflow())
+    wf["jobs"][job]["steps"].append({"name": "Invented upload", "if": "always()", "uses": uses})
+    assert len(uploads(wf)) == 1

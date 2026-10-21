@@ -81,6 +81,9 @@ jobs:
         run: bash tools/ci-ha202610.sh sentinel
       - name: Full retained suite with original phases
         run: bash tools/ci-ha202610.sh suite
+      - name: Full suite on a fresh-boot clock
+        if: ${{ !cancelled() }}
+        run: bash tools/ci-ha202610.sh fakeboot
       - name: Complete source, dependency, build and phase evidence
         if: always()
         run: bash tools/ci-ha202610.sh export

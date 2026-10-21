@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Additional exact target only; the original three-lane workflow stays separate.
 set -euo pipefail
-mode=${1:?setup, checks, sentinel, suite or export required}
+mode=${1:?setup, checks, sentinel, suite, fakeboot or export required}
 [[ ${GITHUB_RUN_ID:-} =~ ^[0-9]+$ ]]
 test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; }
 [[ ${GITHUB_SHA:-} =~ ^[0-9a-f]{40}$ ]]
@@ -39,12 +39,32 @@ case "$mode" in
     if test "$mode" = sentinel; then
       args=(60s tests/test_changeover.py::test_changeover_from_temperature_sensor)
     else
-      args=(180s tests/)
+      # 300 s, as in ci.yml. One hosted runner took about 110 s; two slower ones
+      # were still passing at 180 s, 1,716-1,771 of 1,969 tests in. Locally, in
+      # the exact 2026.10 environment, a full pass takes 119-154 s.
+      args=(300s tests/)
     fi
     result=0
     timeout --signal=TERM --kill-after=5s "${args[0]}" "$python" -m pytest \
       -p tools.pytest_phases "${args[1]}" -q -s -p no:cacheprovider > "$root/$mode.log" 2>&1 || result=$?
     printf '%s\n' "$result" > "$root/$mode.exit"
+    # A failed or timed-out full pass shows its last lines in its own step; the
+    # export still prints every log whole. The step keeps the pass's exit.
+    if test "$mode" = suite && test "$result" != 0; then
+      tail -n 200 -- "$root/$mode.log" || true
+    fi
+    exit "$result"
+    ;;
+  fakeboot)
+    # The full suite again on a clock that reads as if the runner had booted
+    # two minutes ago (tools/fakeboot.py), with the same phases and limit.
+    result=0
+    FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 300s "$python" -m pytest \
+      -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider > "$root/fakeboot.log" 2>&1 || result=$?
+    printf '%s\n' "$result" > "$root/fakeboot.exit"
+    if test "$result" != 0; then
+      tail -n 200 -- "$root/fakeboot.log" || true
+    fi
     exit "$result"
     ;;
   export)

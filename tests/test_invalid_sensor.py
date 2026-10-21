@@ -31,6 +31,7 @@ from custom_components.mxz_coordinator.const import (
     IDLE_ACTION_FAN_ONLY,
 )
 from custom_components.mxz_coordinator.coordinator import _read_temp, read_room_temp
+from tests.dwell import expire_dwell
 from tests.test_drive import (
     SENSOR_A,
     SENSOR_B,
@@ -93,7 +94,7 @@ async def test_custom_eco_invalid_priority_zone_does_not_outvote_healthy_neighbo
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
 
     for suffix in (
         "_primary_enable",
@@ -118,7 +119,7 @@ async def test_custom_eco_invalid_priority_zone_does_not_outvote_healthy_neighbo
     )
     for invalid in invalid_values:
         await _set_sensor(hass, SENSOR_A, invalid)
-        entry.runtime_data._last_mode_change_ts = 0.0
+        expire_dwell(entry.runtime_data)
         await _recompute(hass, entry)
 
         plan = hass.states.get(_eid(hass, entry, "_plan"))
@@ -138,7 +139,7 @@ async def test_custom_eco_invalid_priority_zone_does_not_outvote_healthy_neighbo
         assert hass.states.get(head_b).state == "heat", invalid
 
     hass.states.async_remove(SENSOR_A)
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     plan = hass.states.get(_eid(hass, entry, "_plan"))
     assert plan.attributes["primary_demand"] == "neutral"
@@ -188,7 +189,7 @@ async def test_preexisting_invalid_observation_parks_by_ordinary_idle_rules(
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     for suffix in (
         "_primary_enable",
         "_secondary_enable",
@@ -215,7 +216,7 @@ async def test_preexisting_invalid_observation_parks_by_ordinary_idle_rules(
     assert hass.states.get(head_a).state == "heat"
 
     await _set_sensor(hass, SENSOR_A, "nan")
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     plan = hass.states.get(_eid(hass, entry, "_plan"))
     assert plan.attributes["primary_demand"] == "neutral"
@@ -403,7 +404,7 @@ async def _setup_two_zones(
     await hass.async_block_till_done()
     # Let the shared mode settle on the rooms' own demand instead of the
     # startup-armed hysteresis; these tests are about the sensor, not dwell.
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     return entry, head_a, head_b
 
 
@@ -530,7 +531,7 @@ async def test_malformed_unit_never_breaks_publication_or_neighbor_commands(
     caplog.clear()
     hass.states.async_set(SENSOR_A, str(hot), {ATTR_UNIT_OF_MEASUREMENT: unit})
     await _set_sensor(hass, SENSOR_B, cold)
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
 
     assert entry.runtime_data.last_update_success is True
@@ -575,7 +576,7 @@ async def test_malformed_unit_never_breaks_publication_or_neighbor_commands(
 
     # ...and a valid unit on the next reading recovers the room.
     await _set_sensor(hass, SENSOR_A, cold)
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     plan = hass.states.get(_eid(hass, entry, "_plan"))
     assert plan.attributes["sensors_ok"] is True
@@ -628,14 +629,14 @@ async def test_malformed_unit_costs_the_neighbour_no_extra_refresh(
     # entirely correct reason.)
     await _set_sensor(hass, SENSOR_A, coord.zones[0].target)
     await _set_sensor(hass, SENSOR_B, cold)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _recompute(hass, entry)
     healthy_ticks = await _refreshes_to_command(hass, entry, head_b, "heat")
 
     # Put it back on a cool run, so the second flip starts where the first did.
     await _set_sensor(hass, SENSOR_A, hot)
     await _set_sensor(hass, SENSOR_B, hot)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _recompute(hass, entry)
     assert await _refreshes_to_command(hass, entry, head_b, "cool") <= 2
     assert coord._engage_latch["secondary"] == "cool"
@@ -643,7 +644,7 @@ async def test_malformed_unit_costs_the_neighbour_no_extra_refresh(
     # The same flip, now with a malformed unit on the OTHER room's sensor.
     hass.states.async_set(SENSOR_A, str(hot), {ATTR_UNIT_OF_MEASUREMENT: []})
     await _set_sensor(hass, SENSOR_B, cold)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _recompute(hass, entry)
     malformed_ticks = await _refreshes_to_command(hass, entry, head_b, "heat")
 
@@ -756,7 +757,7 @@ async def test_eco_parks_an_invalid_room_off_while_a_healthy_room_heats(
     await hass.services.async_call(
         "switch", "turn_on", {"entity_id": _eid(hass, entry, "_eco_idle")}, blocking=True
     )
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     plan = hass.states.get(_eid(hass, entry, "_plan"))
     assert entry.runtime_data.eco_heat_min == pytest.approx(eco_heat_min)
@@ -765,7 +766,7 @@ async def test_eco_parks_an_invalid_room_off_while_a_healthy_room_heats(
     assert hass.states.get(head_a).state == "heat"
 
     await _set_sensor(hass, SENSOR_A, "not-a-number")
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     plan = hass.states.get(_eid(hass, entry, "_plan"))
     assert plan.attributes["primary_demand"] == "neutral"
@@ -811,7 +812,7 @@ async def test_a_unitless_sensor_still_drives_its_room(
     # Same number, now declared in a unit that is not a temperature.
     hass.states.async_set(SENSOR_A, str(cold), {ATTR_UNIT_OF_MEASUREMENT: "%"})
     await hass.async_block_till_done()
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     plan = hass.states.get(_eid(hass, entry, "_plan"))
     assert plan.attributes["sensors_ok"] is False

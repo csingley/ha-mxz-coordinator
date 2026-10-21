@@ -53,6 +53,7 @@ from custom_components.mxz_coordinator.const import (
     DOMAIN,
 )
 from custom_components.mxz_coordinator.logic import shared_mode
+from tests.dwell import expire_dwell
 
 SENSOR_A = "sensor.room_a_temp"
 SENSOR_B = "sensor.room_b_temp"
@@ -342,7 +343,7 @@ async def test_no_time_based_release_of_a_selection_is_introduced(
     assert hass.states.get(sel).state == "heat"
 
     # Dwell elapsed: the answer is arbitration's own, on the same demands.
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     expected = shared_mode(
         demands=[coord.data[f"{zone.slug}_demand"] for zone in coord.zones],
         current="heat",
@@ -521,7 +522,7 @@ async def test_migration_creates_no_hold(hass: HomeAssistant) -> None:
 
     sel = _eid(hass, entry, "_shared_mode")
     await _set_temp(hass, SENSOR_B, 60)  # a genuine heat demand
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
 
     assert hass.states.get(_eid(hass, entry, "_plan")).state == "heat"

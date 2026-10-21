@@ -50,6 +50,7 @@ from custom_components.mxz_coordinator.const import (
     CONF_SECONDARY_SENSOR,
     DOMAIN,
 )
+from tests.dwell import expire_dwell
 
 SENSOR_A = "sensor.room_a_temp"
 SENSOR_B = "sensor.room_b_temp"
@@ -636,7 +637,7 @@ async def test_hvac_action_idle_while_parked_on_opposite_mode(hass: HomeAssistan
     await _enable(hass, entry, "_primary_enable", "_secondary_enable", "_coordinator_enable")
 
     # Hysteresis arms at startup (#6): age the clock so this test's flip is allowed.
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
 
     # Primary (higher priority) wants heat; secondary wants cool -> standoff,
     # primary wins the shared mode.
@@ -677,7 +678,7 @@ async def test_auto_flip_updates_thermostat(hass: HomeAssistant) -> None:
     prim = _eid(hass, entry, "_primary_thermostat")
 
     # Hysteresis arms at startup now (#6): age the clock so this test's flip is allowed.
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     # Cold primary -> wants heat.
     await _set_temp(hass, SENSOR_A, 60)
     await _set_temp(hass, SENSOR_B, 70)

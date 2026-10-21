@@ -38,6 +38,7 @@ from custom_components.mxz_coordinator.const import (
     DOMAIN,
 )
 
+from .dwell import expire_dwell
 from .test_drive import MockHeadC
 from .test_issue7 import TARGET_EID, _platform, _zones
 from .test_single_setpoint import (
@@ -113,7 +114,7 @@ async def test_heat_low_edge_clamped_to_native_min(hass: HomeAssistant) -> None:
     entry = await _setup(hass, heads)
     await _enable(hass, entry)
     coord = entry.runtime_data
-    coord._last_mode_change_ts = 0.0  # allow the cool->heat flip
+    expire_dwell(coord)  # allow the cool->heat flip
 
     coord.zones[0].target = 62.0
     coord.reset_engage_latch(coord.zones[0].slug)

@@ -45,7 +45,33 @@ def violations(workflow):
                 errors.append("dependency cache")
             if "secrets." in str(step):
                 errors.append("secret input")
+    errors += fresh_boot_violations(jobs.get("pytest", {}))
     return errors
+
+
+FRESH_BOOT_RUN = (
+    'FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 300s python -m pytest '
+    '-p tools.fakeboot -p tools.pytest_phases tests/ -q -s > "$RUNNER_TEMP/fakeboot.log" 2>&1'
+)
+
+
+def fresh_boot_violations(job):
+    """Every pytest lane runs the whole suite again on a clock 120 s after boot."""
+    steps = [s for s in job.get("steps", []) if "-p tools.fakeboot" in s.get("run", "")]
+    names = [s.get("name") for s in job.get("steps", [])]
+    if (len(steps) != 1 or steps[0].get("name") != "Full suite on a fresh-boot clock"
+            or steps[0].get("if") != "${{ !cancelled() }}"
+            or FRESH_BOOT_RUN not in steps[0]["run"]
+            or "Full retained suite" not in names
+            or names.index("Full retained suite") > names.index("Full suite on a fresh-boot clock")
+            or names.index("Full suite on a fresh-boot clock") > names.index("Complete logs and owned cleanup")):
+        return ["fresh-boot suite guard"]
+    export = next(s["run"] for s in job["steps"] if s.get("name") == "Complete logs and owned cleanup")
+    if ("logs=(install sentinel suite fakeboot)" not in export
+            or "for run in suite fakeboot; do" not in export
+            or "grep -qx 'FAKEBOOT_UPTIME=120'" not in export):
+        return ["fresh-boot suite guard"]
+    return []
 
 
 @pytest.fixture(scope="module")
@@ -65,10 +91,44 @@ def test_declared_ci_boundary(workflow):
     assert violations(workflow) == []
 
 
-@pytest.mark.parametrize("change", ["token", "runner", "environment", "checkout", "upload", "secret", "missing"])
+@pytest.mark.parametrize("change", [
+    "token", "runner", "environment", "checkout", "upload", "secret", "missing",
+    "fakeboot-missing", "fakeboot-one-lane", "fakeboot-skipped-after-failure", "fakeboot-uptime",
+    "fakeboot-no-plugin", "fakeboot-subset", "fakeboot-duplicate", "fakeboot-not-exported",
+    "fakeboot-clock-unchecked", "fakeboot-after-export",
+])
 def test_weakened_ci_boundary_rejects(workflow, change):
     bad = deepcopy(workflow)
     job = bad["jobs"]["pytest"]
+    if change.startswith("fakeboot-"):
+        steps = job["steps"]
+        fresh = next(s for s in steps if s.get("name") == "Full suite on a fresh-boot clock")
+        export = next(s for s in steps if s.get("name") == "Complete logs and owned cleanup")
+        if change == "fakeboot-missing":
+            steps.remove(fresh)
+        elif change == "fakeboot-one-lane":
+            fresh["if"] = "${{ !cancelled() && matrix.lane == 'py3.14-ha2026.9.0' }}"
+        elif change == "fakeboot-skipped-after-failure":
+            del fresh["if"]
+        elif change == "fakeboot-uptime":
+            fresh["run"] = fresh["run"].replace("FAKE_UPTIME=120", "FAKE_UPTIME=86400")
+        elif change == "fakeboot-no-plugin":
+            fresh["run"] = fresh["run"].replace("-p tools.fakeboot -p tools.pytest_phases",
+                                                "-p tools.pytest_phases")
+        elif change == "fakeboot-subset":
+            fresh["run"] = fresh["run"].replace("tests/ -q", "tests/test_dwell_wakeup.py -q")
+        elif change == "fakeboot-duplicate":
+            steps.insert(steps.index(fresh), deepcopy(fresh))
+        elif change == "fakeboot-not-exported":
+            export["run"] = export["run"].replace("logs=(install sentinel suite fakeboot)",
+                                                  "logs=(install sentinel suite)")
+        elif change == "fakeboot-clock-unchecked":
+            export["run"] = export["run"].replace("grep -qx 'FAKEBOOT_UPTIME=120'", "true")
+        else:
+            steps.remove(fresh)
+            steps.append(fresh)
+        assert violations(bad) == ["fresh-boot suite guard"]
+        return
     if change == "token":
         bad["permissions"] = {"contents": "write"}
     elif change == "runner":
@@ -239,11 +299,15 @@ def test_actual_parent_guard_refuses_before_inventory_or_export(tmp_path, key, v
     assert not (tmp_path / "issue25-released").exists()
 
 
-def suite_payload(exit_code=0):
-    """Invented ordinary phase output; no HA or candidate imports."""
+def suite_payload(exit_code=0, fakeboot=False):
+    """Invented ordinary phase output; no HA or candidate imports.
+
+    ``fakeboot``: as ``tools/fakeboot.py`` prints it, once, at session start.
+    """
     call_outcome = "failed" if exit_code else "passed"
     return (
-        'invented complete suite output\n'
+        ('FAKEBOOT_UPTIME=120\n' if fakeboot else '')
+        + 'invented complete suite output\n'
         'COLLECTED ["invented::test_case"]\n'
         'PHASE {"node": "invented::test_case", "phase": "setup", "outcome": "passed"}\n'
         f'PHASE {{"node": "invented::test_case", "phase": "call", "outcome": "{call_outcome}"}}\n'
@@ -268,6 +332,8 @@ def suite_export(tmp_path, workflow):
     (root / "sentinel.log").write_text("invented sentinel\n")
     (root / "suite.log").write_text(suite_payload())
     (root / "suite.exit").write_text("0\n")
+    (root / "fakeboot.log").write_text(suite_payload(fakeboot=True))
+    (root / "fakeboot.exit").write_text("0\n")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     # Only the two Git cleanliness commands in the real export block are stubbed.
@@ -292,18 +358,31 @@ def run_suite_source(source, root, env):
                           check=False, capture_output=True, text=True, timeout=5)
 
 
+# Each full-suite step: its pytest arguments, and the environment it must set.
+SUITE_RUNS = {
+    "suite": ("Full retained suite", "-m pytest -p tools.pytest_phases tests/ -q -s", ""),
+    "fakeboot": ("Full suite on a fresh-boot clock",
+                 "-m pytest -p tools.fakeboot -p tools.pytest_phases tests/ -q -s", "120"),
+}
+
+
+@pytest.mark.parametrize("run", sorted(SUITE_RUNS))
 @pytest.mark.parametrize("outcome,expected", [
     ("success", 0), ("failure", 1), ("error", 2), ("timeout", 124),
     ("success-oversize", 0), ("failure-oversize", 1),
 ])
-def test_actual_suite_exit_survives_export(suite_export, outcome, expected):
-    root, bin_dir, env, suite, export = suite_export
+def test_actual_suite_exit_survives_export(suite_export, workflow, run, outcome, expected):
+    root, bin_dir, env, _suite, export = suite_export
+    name, argv, uptime = SUITE_RUNS[run]
+    suite = next(s["run"] for s in workflow["jobs"]["pytest"]["steps"] if s.get("name") == name)
+    label = run.upper()
     # Execute the unmodified workflow block with an invented executable, never pytest.
     python = bin_dir / "python"
-    python.write_text('''#!/bin/bash
+    python.write_text(f'''#!/bin/bash
 set -eu
-test "$*" = '-m pytest -p tools.pytest_phases tests/ -q -s'
-if test "$INVENTED_OUTCOME" = timeout; then
+test "$*" = '{argv}'
+test "${{FAKE_UPTIME-unset}}" = '{uptime or "unset"}'
+''' + '''if test "$INVENTED_OUTCOME" = timeout; then
   echo 'invented partial suite before timeout'
   exec sleep 10
 fi
@@ -327,35 +406,41 @@ exec /usr/bin/timeout --signal=TERM --kill-after=5s 300s "$@"
 ''')
     watchdog.chmod(0o755)
     env.update(INVENTED_OUTCOME=outcome, INVENTED_EXIT=str(expected))
-    payload = suite_payload(expected)
+    payload = suite_payload(expected, fakeboot=run == "fakeboot")
     if outcome.endswith("-oversize"):
         payload = "x" * 5242880 + "\n" + payload
     elif outcome == "error":
         payload = 'invented interrupted collection\n'
     (root / "payload").write_text(payload)
     # A prior status must be overwritten, never appended or reused.
-    (root / "suite.exit").write_text("99\n")
+    (root / f"{run}.exit").write_text("99\n")
     result = run_suite_source(suite, root, env)
     assert result.returncode == expected, result.stderr
-    assert result.stdout.splitlines() == [f"SUITE_EXIT={expected}"]
-    assert (root / "suite.exit").read_text() == f"{expected}\n"
-    raw = (root / "suite.log").read_text()
+    assert result.stdout.splitlines() == [f"{label}_EXIT={expected}"]
+    assert (root / f"{run}.exit").read_text() == f"{expected}\n"
+    raw = (root / f"{run}.log").read_text()
     assert raw == ("invented partial suite before timeout\n" if outcome == "timeout" else payload)
     exported = run_suite_source(export, root, env)
     incomplete = outcome in ("timeout", "error") or outcome.endswith("-oversize")
     assert exported.returncode == int(incomplete), exported.stderr
-    assert f"RETAINED_SUITE_EXIT={expected}\n" in exported.stdout
+    assert f"RETAINED_{label}_EXIT={expected}\n" in exported.stdout
     if outcome.endswith("-oversize"):
-        assert "LOG_BUDGET_EXCEEDED=suite COMPLETE_EXPORT=false" in exported.stdout
+        assert f"LOG_BUDGET_EXCEEDED={run} COMPLETE_EXPORT=false" in exported.stdout
         assert raw not in exported.stdout
     else:
         assert raw in exported.stdout
-    assert (root / "suite.exit").read_text() == f"{expected}\n"
-    assert (root / "suite.log").read_text() == raw
+    assert (root / f"{run}.exit").read_text() == f"{expected}\n"
+    assert (root / f"{run}.log").read_text() == raw
     assert "OWNED_SCRATCH_REMOVED=true" in exported.stdout
     assert not (root / "mxz-venv").exists()
     if outcome in ("timeout", "error"):
-        assert "INCOMPLETE_SUITE_PHASES" in exported.stdout
+        assert f"INCOMPLETE_{label}_PHASES" in exported.stdout
+        if run == "fakeboot":
+            assert "MISSING_FAKEBOOT_CLOCK" in exported.stdout
+    # The other run's evidence is untouched and still certifies on its own.
+    other = "suite" if run == "fakeboot" else "fakeboot"
+    assert f"RETAINED_{other.upper()}_EXIT=0\n" in exported.stdout
+    assert f"INCOMPLETE_{other.upper()}_PHASES" not in exported.stdout
     assert f"LOG_EXPORT_COMPLETE result={int(incomplete)}" in exported.stdout
 
 
@@ -422,6 +507,60 @@ def test_actual_export_rejects_invalid_or_incomplete_evidence(suite_export, faul
         assert f"MISSING_LOG={fault.removeprefix('missing-')}" in result.stdout
     elif fault not in invalid_exits:
         assert "INCOMPLETE_SUITE_PHASES" in result.stdout
+
+
+@pytest.mark.parametrize("fault", [
+    "missing-exit", "text-exit", "range-exit", "duplicate-exit", "no-newline-exit",
+    "missing-log", "oversize-log", "missing-completion", "invalid-phases", "mismatched-exit",
+    "missing-clock", "duplicate-clock", "other-uptime", "clock-not-at-line-start",
+])
+def test_actual_export_rejects_invalid_or_incomplete_fresh_boot_evidence(suite_export, fault):
+    """The fresh-boot run certifies like the suite, and only from the fake clock."""
+    root, _bin_dir, env, _suite, export = suite_export
+    clean = run_suite_source(export, root, env)
+    assert clean.returncode == 0 and "LOG_EXPORT_COMPLETE result=0" in clean.stdout, clean.stdout
+    for name, payload in (("suite.log", suite_payload()), ("fakeboot.log", suite_payload(fakeboot=True))):
+        (root / name).write_text(payload)
+    for name in ("mxz-venv", "issue25-released", "issue25-main"):
+        (root / name).mkdir(exist_ok=True)
+    exits = {"missing-exit": None, "text-exit": b"bad\n", "range-exit": b"256\n",
+             "duplicate-exit": b"0\n0\n", "no-newline-exit": b"0"}
+    payload = suite_payload(fakeboot=True)
+    if fault in exits:
+        if exits[fault] is None:
+            (root / "fakeboot.exit").unlink()
+        else:
+            (root / "fakeboot.exit").write_bytes(exits[fault])
+    elif fault == "missing-log":
+        (root / "fakeboot.log").unlink()
+    elif fault == "oversize-log":
+        (root / "fakeboot.log").write_text("x" * 5242880 + "\n" + payload)
+    else:
+        payload = {
+            "missing-completion": "\n".join(l for l in payload.splitlines() if not l.startswith("PHASES_COMPLETE ")) + "\n",
+            "invalid-phases": payload.replace("PHASES_VALID=true", "PHASES_VALID=false"),
+            "mismatched-exit": payload.replace('"exit": 0', '"exit": 1'),
+            "missing-clock": suite_payload(),
+            "duplicate-clock": payload + "FAKEBOOT_UPTIME=120\n",
+            "other-uptime": payload.replace("FAKEBOOT_UPTIME=120", "FAKEBOOT_UPTIME=86400"),
+            "clock-not-at-line-start": payload.replace("FAKEBOOT_UPTIME=120", " FAKEBOOT_UPTIME=120"),
+        }[fault]
+        (root / "fakeboot.log").write_text(payload)
+    before = {p.name: p.read_bytes() for p in root.glob("*.log")}
+    result = run_suite_source(export, root, env)
+    assert result.returncode != 0, result.stdout
+    assert "LOG_EXPORT_COMPLETE result=1" in result.stdout
+    assert {p.name: p.read_bytes() for p in root.glob("*.log")} == before
+    assert not (root / "mxz-venv").exists()
+    assert "RETAINED_SUITE_EXIT=0\n" in result.stdout
+    assert "INCOMPLETE_SUITE_PHASES" not in result.stdout
+    expected = {
+        "missing-exit": "MISSING_OR_OVERSIZE_FAKEBOOT_EXIT", "missing-log": "MISSING_LOG=fakeboot",
+        "oversize-log": "LOG_BUDGET_EXCEEDED=fakeboot COMPLETE_EXPORT=false",
+        "missing-completion": "INCOMPLETE_FAKEBOOT_PHASES", "invalid-phases": "INCOMPLETE_FAKEBOOT_PHASES",
+        "mismatched-exit": "INCOMPLETE_FAKEBOOT_PHASES",
+    }.get(fault, "INVALID_FAKEBOOT_EXIT" if fault in exits else "MISSING_FAKEBOOT_CLOCK")
+    assert expected in result.stdout.splitlines(), result.stdout
 
 
 def test_suite_log_stream_keeps_warnings_while_tests_keep_info(caplog):
@@ -521,6 +660,9 @@ def test_actual_export_five_mib_boundary(tmp_path, workflow, boundary_phases, ex
     assert len(payload) == size
     (root / "suite.log").write_bytes(payload)
     (root / "suite.exit").write_text(f"{exit_code}\n")
+    # Invented phases, not the child's: the oversize suite must stay unexported.
+    (root / "fakeboot.log").write_text(suite_payload(exit_code, fakeboot=True))
+    (root / "fakeboot.exit").write_text(f"{exit_code}\n")
     for name in ("install", "sentinel"):
         (root / f"{name}.log").write_text(f"invented {name} log\n")
     for name in ("mxz-venv", "issue25-released", "issue25-main"):
@@ -529,6 +671,7 @@ def test_actual_export_five_mib_boundary(tmp_path, workflow, boundary_phases, ex
                   if s.get("name") == "Complete logs and owned cleanup")
     assert export["if"] == "always()"
     assert "suite) limit=5242880 ;;" in export["run"]
+    assert "fakeboot) limit=5242880 ;;" in export["run"]
     env["RUNNER_TEMP"] = str(root)
     result = subprocess.run(["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", export["run"]],
                             cwd=repo, env=env, stdin=subprocess.DEVNULL,

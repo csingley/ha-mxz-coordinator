@@ -9,6 +9,7 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 from homeassistant.core import HomeAssistant
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
+from tests.dwell import expire_dwell
 from tests.test_drive import (
     SENSOR_A,
     SENSOR_B,
@@ -92,7 +93,7 @@ async def test_demand_respects_the_rooms_own_drift(hass: HomeAssistant) -> None:
     # Secondary: target 62 default? the harness sets primary target 62 only;
     # secondary target defaults to 70 -> drive it cold to call heat.
     await _set_temp(hass, SENSOR_B, 65)    # 5° below its 70 target -> heat
-    entry.runtime_data._last_mode_change_ts = 0.0  # clear the 600 s flip gate
+    expire_dwell(entry.runtime_data)  # clear the 600 s flip gate
     await _recompute(hass, entry)
     plan = hass.states.get(_eid(hass, entry, "_plan"))
     assert plan.attributes["zones"][0]["demand"] == "neutral"  # in-band: no vote

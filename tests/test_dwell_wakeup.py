@@ -8,13 +8,15 @@ the model) that carries NO decision: it asks for a recompute of the inputs as
 they are when it fires, so a manual choice made in between wins.
 
 Time idiom, as in ``test_idle_dry``: firing HA's time machinery does not move
-``dt_util.utcnow``, so the dwell clock is aged by rewinding the coordinator's
+``time.monotonic`` (the dwell clock, deliberately not wall-clock — see
+coordinator.py), so the dwell clock is aged by rewinding the coordinator's
 own stamp and the timer is then fired for real.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any
@@ -56,6 +58,7 @@ from custom_components.mxz_coordinator.const import (
     STARTUP_RECOVER_DELAY,
 )
 from custom_components.mxz_coordinator.coordinator import MXZCoordinator
+from tests.dwell import assert_restamped, expire_dwell
 from tests.test_drive import (
     INHIBIT,
     SENSOR_A,
@@ -488,6 +491,9 @@ async def test_manual_shared_mode_choice_restarts_the_dwell(
     """A manual mode choice stamps its own dwell; the old wakeup can't jump it."""
     entry, _a, _b = await _setup_dwell(hass)
     coord = await _defer_a_heat_flip(hass, entry)
+    # Run the startup dwell out first, so whatever holds the mode from here on
+    # is the stamp the choice itself writes.
+    long_ago = expire_dwell(coord)
 
     await hass.services.async_call(
         "select",
@@ -495,6 +501,7 @@ async def test_manual_shared_mode_choice_restarts_the_dwell(
         {"entity_id": _eid(hass, entry, "_shared_mode"), "option": MODE_HEAT},
         blocking=True,
     )
+    assert_restamped(coord, long_ago)
     await _recompute(hass, entry)
     assert coord.current_shared_mode == MODE_HEAT
 
@@ -559,9 +566,7 @@ async def test_heat_lockout_leaves_nothing_for_the_wakeup(
 
 def _dwell_left(coord: MXZCoordinator, seconds: float) -> None:
     """Leave ``seconds`` of dwell on the clock (the suite's stamp rewind)."""
-    coord._last_mode_change_ts = (
-        dt_util.utcnow().timestamp() - coord.hysteresis + seconds
-    )
+    coord._last_mode_change_ts = time.monotonic() - coord.hysteresis + seconds
 
 
 def _defer_a_flip_without_a_pending_refresh(coord: MXZCoordinator) -> None:

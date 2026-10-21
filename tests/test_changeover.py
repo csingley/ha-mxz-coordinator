@@ -50,6 +50,7 @@ from custom_components.mxz_coordinator.const import (
     DOMAIN,
     IDLE_ACTION_FAN_ONLY,
 )
+from tests.dwell import expire_dwell
 
 SENSOR_A = "sensor.room_a_temp"
 SENSOR_B = "sensor.room_b_temp"
@@ -244,7 +245,7 @@ async def test_changeover_end_to_end_head_behavior(hass: HomeAssistant) -> None:
 
     entry = await _mxz_entry(hass, head_a, head_b, "sensor.outdoor_high")
     # Hysteresis arms at startup now (#6): age the clock so this test's flip is allowed.
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
 
     # Enable both rooms + the coordinator.
     for suffix in ("_primary_enable", "_secondary_enable", "_coordinator_enable"):
