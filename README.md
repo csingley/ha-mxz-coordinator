@@ -161,10 +161,20 @@ supported hardware and setup apply. It is not tested for parity with this integr
   [@csingley](https://github.com/csingley) in
   [#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31). See
   [Safety priority](#safety-priority).
-- **Upgrading changes nothing.** The setting is unset for every room, including every
-  room of an existing install, and a room without it behaves exactly as in 3.6.0.
-  There is no migration. See
-  [Safety priority (3.7.0)](docs/MIGRATION.md#safety-priority-370).
+- **Freeze floor and overheat ceiling.** Two new, optional per-room numbers in
+  Configure → Rooms → (room), empty by default. While a room is disabled, MXZ heats it
+  below its floor and cools it above its ceiling, then turns the head off again. A
+  freeze floor outranks every other want, a Safety priority room's included; a ceiling
+  ranks with Safety priority rooms by room order. It never acts on a lost or stale
+  sensor, ends a run that makes no progress in 2 hours of running, never writes the
+  fan, and never touches anything but that room's own head. It builds on the safety
+  priority tier above. See
+  [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling).
+- **Upgrading changes nothing.** Both settings are unset for every room, including
+  every room of an existing install, and a room without them behaves exactly as in
+  3.6.0. There is no migration. See
+  [Safety priority (3.7.0)](docs/MIGRATION.md#safety-priority-370) and
+  [Freeze floor and overheat ceiling (3.7.0)](docs/MIGRATION.md#freeze-floor-and-overheat-ceiling-370).
 - 3.7.0 has not been tested on hardware.
 
 From 3.6.0:
@@ -806,6 +816,112 @@ What the sensor should mean:
 - Reserve it for a real floor or ceiling condition in that room, not everyday comfort:
   an override that is on every day defeats the priority order.
 
+For a disabled room that must not freeze or overheat, use
+[Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling) instead: that
+does start heat or cool.
+
+### Freeze floor and overheat ceiling
+
+Each room can have a **Freeze floor** and an **Overheat ceiling**: two optional numbers
+in Configure → Rooms → (room) → **Freeze floor and overheat ceiling**, in your Home
+Assistant temperature unit (floor 35-65 °F / 2-18 °C, ceiling 75-100 °F / 24-38 °C).
+Both are empty for every room, including every room of an existing install, and an
+empty field stores nothing, so nothing changes until you fill one in. Saving a room
+page for anything else never sets one. 50 °F (10 °C) is a typical freeze floor.
+
+What it does:
+
+- **It acts only while the room is disabled**, held off or run from its own remote.
+  An enabled room below its floor just calls heat as an ordinary room; the floor does
+  not lift it.
+- **Below the floor MXZ heats the room; above the ceiling it cools it.** This can turn
+  on a head you hold off. It runs the head until the room sensor reaches the clear
+  line, 3 °F (1.5 °C) back inside (a 50 °F floor clears at 53 °F), then turns the head
+  off. It trips again only past the floor or ceiling again.
+- **The setpoint is the clear line**, clamped to your setpoint range and the head's own
+  limits: with the default 59 °F lowest setpoint, a 50 °F floor commands 59 °F. Never
+  the away band. MXZ ends the run on the room sensor; if the head reads warmer than the
+  room, its own thermostat can stop before the room reaches the clear line, and the
+  no-progress limit below then ends the run.
+- **Where it ranks.** A tripped freeze floor's heat outranks every other room's want,
+  a [Safety priority](#safety-priority) room's included: freeze first, whatever the
+  room order. A tripped overheat ceiling's cool outranks every ordinary want, and
+  against a Safety priority room the earlier room in priority order wins. Two trips
+  of the same kind want the same mode, so both run. The mode-change wait still
+  applies; while the room waits for its mode its head is held `off` (never `fan_only`),
+  and a flip a floor causes starts the wait like any other.
+- **It never writes the fan.** A floor run sends only the mode and the setpoint, so a
+  fan speed someone picked on that head stays.
+- **It hands back with the head off.** A held-off room goes back to being held off. A
+  room run from its own remote is parked off and then left alone again, as when you
+  first disable it; MXZ's own heat or cool never counts as that room's vote.
+- **A person at the head.** On a held-off room, MXZ puts its heat or cool back at the
+  next room-sensor report or the 15-minute check. On a room run from its own remote,
+  changing the head during a run hands it to that person at once: MXZ stands down
+  until the room reaches the clear line or 4 hours pass, then the floor is armed again,
+  so someone who keeps turning the head off in a freezing room is overridden again
+  every 4 hours.
+- **Standby hold and Coordinator.** It still runs under an `eco` standby hold, the
+  default for a load-shed, so a held-off or own-remote head can start during one. It
+  never runs under an `off` or `fan_only` hold. With Coordinator off it sends nothing;
+  a head it was running keeps its last command.
+- **Notices.** MXZ notifies when a floor trips, when it cannot protect the room
+  (`blind`, below) and when a head rejects a floor command, through the service you
+  set as **Notify on drift**. Nothing is sent when the room clears. With no
+  notification service set, nothing is sent; the plan still shows the state.
+- **Restarts.** A run in progress, with its progress record, survives a Home Assistant
+  restart. Time Home Assistant is down does not count toward the 2-hour limit.
+
+When it does not act (fail safe):
+
+- **No usable reading, no action.** A room sensor that is unavailable, unknown,
+  missing, not a number, or stale under its [freshness contract](#choose-a-sensor-freshness-contract)
+  never trips the floor, and a run whose sensor is lost ends at once. The room shows
+  `blind`. A sensor that flaps in and out ends and restarts the run each time.
+- **Head unavailable.** A tripped room whose head is unavailable casts no want, so it
+  cannot hold the other rooms' direction for a head that cannot run. It shows `blind`.
+- **No-progress limit.** A sensor can be stuck at a valid number, and a room whose
+  sensor has no freshness contract is never stale. So a run that has actually driven
+  the head for **2 hours without 1 °F (0.5 °C) of new best reading** ends as `blind`
+  (stalled), with a notice. Waiting for the mode, losing to a higher-ranked want, a
+  standby hold and Coordinator off do not count. It is armed again only when the room
+  reaches the clear line or a new low (a new high for a ceiling), one full step past
+  its worst reading; a sensor flickering between two values does neither. A real but
+  slow room cycles: 2 hours on, stalled until it falls another degree, on again, with a
+  notice each time. A stuck sensor stays `blind` after one notice (one more after
+  each Home Assistant restart).
+
+What it does not do:
+
+- **It only ever touches the room's own Mitsubishi head**, the one configured for that
+  room. It never controls a Carrier Infinity system, a furnace or any other climate
+  entity, and it does not change the room's target, enable switch or fan.
+- It is not a substitute for freeze protection that works without Home Assistant. If
+  Home Assistant, the room sensor, the head or the outdoor unit is down, nothing here
+  can act. Whether the outdoor unit can cool at a low outdoor temperature is not known
+  here; if it cannot make progress, the 2-hour limit ends the run.
+- There is no automation recipe for it, and nothing about it applies to enabled rooms.
+
+On `sensor.*_plan` each room in `zones` shows `floor_low`, `floor_high`, `floor_want`
+(the direction its floor asks of the outdoor unit, or null), `floor_state` and
+`floor_reason`:
+
+| `floor_state` | Meaning |
+| --- | --- |
+| `none` | No floor or ceiling set. |
+| `enabled` | One is set, but the room is enabled, so it does not act. |
+| `armed` | Watching; not tripped. |
+| `heat` / `cool` | Tripped, and MXZ is running the head that way now. |
+| `held` | Tripped and asking for its mode, but not running: the mode-change wait, a higher-ranked want, a standby hold or Coordinator off. `floor_reason` says which. |
+| `blind` | Cannot protect the room: no usable reading, head unavailable, or stalled by the 2-hour limit. `floor_reason` says which. |
+| `yielded` | A room run from its own remote that a person changed during a run; `floor_reason` says when the floor re-arms. |
+
+The top-level `mode_by_floor` is true while a tripped floor's direction is the shared
+mode, and `mode_by_safety` is true then too. `standoff` counts a floor's want. A room
+run from its own remote reads `floor` in `hands_off` during a run. The room tile stays
+`off` (the room is still disabled); while a floor is tripped its action follows the
+head, as it does for a room run from its own remote.
+
 ### Who drives the fan
 
 Fan boost starts enabled. On compatible heads it follows the supported ladder
@@ -958,7 +1074,8 @@ refer to priority slots, not permanent room identities.
 | --- | --- |
 | `standoff`, demand/engage, mode dwell | Another room's priority or dwell may be holding the direction. Check targets and priority before changing a raw head. |
 | `mode_by_hands_off`, room `hands_off_vote` | True when a disabled room run from its own remote set the shared mode, with no enabled room calling or still running to its target, or the mode went back after its vote ended; that change starts no mode-change wait. Always false with no room opted in. See [Run one room from its own remote](#run-one-room-from-its-own-remote). |
-| `mode_by_safety`, room `safety_priority` | True while a room marked Safety priority is asserting and its want is the shared mode. Taking the mode from an enabled room that is calling or still running to its target starts the mode-change wait like any real reversal; deciding while no enabled room is calling or running does not. Always false with no sensor wired. See [Safety priority](#safety-priority). |
+| `mode_by_safety`, room `safety_priority` | True while a room marked Safety priority is asserting and its want is the shared mode, or a tripped freeze floor or overheat ceiling's is. Taking the mode from an enabled room that is calling or still running to its target starts the mode-change wait like any real reversal; deciding while no enabled room is calling or running does not. Always false with no sensor wired and no floor tripped. See [Safety priority](#safety-priority). |
+| `mode_by_floor`, room `floor_state`, `floor_reason`, `floor_want`, `floor_low`, `floor_high` | `mode_by_floor` is true while a tripped freeze floor or overheat ceiling's direction is the shared mode. Each room's `floor_state` is `none`, `enabled`, `armed`, `heat`/`cool` (running), `held` (waiting), `blind` (cannot protect: no reading, head unavailable, stalled) or `yielded`, and `floor_reason` says why. Always false and `none` with no floor set. See [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling). |
 | `inhibited`, room enable, lockouts, eco | A configured gate may be parking the room. Check the controlling switch/input. |
 | `sensor_health`, `sensor_age`, `sensors_ok` | Check validity and the freshness contract. Age of an HA write can differ from age of a sample. |
 | `fan_hold`, `control_reasons` | Check ownership, capability, restore and settings warnings with their suggested next step. |
@@ -1078,6 +1195,20 @@ which an ordinary vote from a room run on its own remote never overrides. It onl
 raises a want the room already has; it never starts heat or cool by itself, so it is
 not freeze protection. Reserve it for a real floor or ceiling condition, not everyday
 comfort: it is an override, not a priority bump. See [Safety priority](#safety-priority).
+
+</details>
+
+<details>
+<summary><b>Keep a disabled room from freezing (or overheating)</b></summary>
+
+Fill in that room's **Freeze floor** (and, if you want, **Overheat ceiling**) in
+Configure → Rooms → (room). Both are empty by default. While the room is disabled,
+MXZ heats it when its sensor falls below the floor (cools it above the ceiling), runs
+it 3 °F (1.5 °C) back inside, then turns the head off again. A freeze floor wins over
+every other room. It does nothing on a lost or stale sensor, gives up after 2 hours of
+running without progress, and never touches anything but that room's own head; each
+of those sends a notice through **Notify on drift**. See
+[Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling).
 
 </details>
 
@@ -1290,7 +1421,7 @@ MXZ Coordinator got this good because people ran it on their own systems, found 
 - [@helicopterrun](https://github.com/helicopterrun) validated it on 3-zone hardware and did relentless, root-caused QA through the v3 beta ([#4](https://github.com/dkpnw/ha-mxz-coordinator/issues/4), [#5](https://github.com/dkpnw/ha-mxz-coordinator/issues/5), [#6](https://github.com/dkpnw/ha-mxz-coordinator/issues/6), [#7](https://github.com/dkpnw/ha-mxz-coordinator/issues/7)). Those reports led to the removal docs, single-setpoint head support and entry-scoped restore.
 - [@oliverbrandmueller](https://github.com/oliverbrandmueller) asked for metric units ([#2](https://github.com/dkpnw/ha-mxz-coordinator/issues/2)). Since 2.8.0 the coordinator runs in your Home Assistant temperature unit from end to end.
 - **mw1029** on the [Home Assistant forum](https://community.home-assistant.io/t/1018382) tried MXZ with the cloud-based `comfort_HA` integration and posted both entity dumps, which showed exactly where the two don't line up. Support for it is in progress.
-- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author, and he tested it on his own 4-zone MXZ-4C36NA2 before release. It shipped in 3.6.0. He then designed and wrote the safety-priority arbitration ([#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31)): every room's heat or cool want ranked in one priority order, with an optional per-room **Safety priority** sensor that lifts a room's own want above every other room's. It is set for 3.7.0, which is not released yet.
+- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author, and he tested it on his own 4-zone MXZ-4C36NA2 before release. It shipped in 3.6.0. He then designed and wrote the safety-priority arbitration ([#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31)): every room's heat or cool want ranked in one priority order, with an optional per-room **Safety priority** sensor that lifts a room's own want above every other room's. It is set for 3.7.0, which is not released yet. The 3.7.0 freeze floor and overheat ceiling build on his safety tier: a tripped floor or ceiling is one more want in that same priority order, with the freeze floor ranked first.
 
 **Prior art and references**
 
