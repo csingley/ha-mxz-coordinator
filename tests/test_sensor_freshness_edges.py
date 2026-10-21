@@ -22,6 +22,7 @@ read what the product did by itself.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -1155,6 +1156,8 @@ async def test_recovery_re_enters_arbitration_without_bypassing_the_mode_dwell(
         **{CONF_MODE_HYSTERESIS: 400},
     )
     coord: MXZCoordinator = entry.runtime_data
+    # The dwell runs on time.monotonic (#32), which freezer moves with the wall
+    # clock; it is read on its own clock here, never against _now().
     started = coord._last_mode_change_ts
     await _report(hass, SENSOR_B, HOT[False])  # room B votes cool throughout
     await _drain_startup(hass, freezer)
@@ -1169,7 +1172,7 @@ async def test_recovery_re_enters_arbitration_without_bypassing_the_mode_dwell(
     assert _health(coord) == HEALTH_STALE
     assert coord.data["primary_demand"] == DEMAND_NEUTRAL
     assert coord.data["state"] == MODE_COOL
-    assert _now() < started + 400, "still inside the dwell"
+    assert time.monotonic() < started + 400, "still inside the dwell"
 
     await _report(hass, SENSOR_A, COLD)  # one fresh valid report, same reading
     await _settle(hass, freezer)
@@ -1180,7 +1183,7 @@ async def test_recovery_re_enters_arbitration_without_bypassing_the_mode_dwell(
     assert coord.data["mode_change_allowed"] is False
     assert hass.states.get(head_a).state != MODE_HEAT
 
-    await _exact(hass, freezer, timedelta(seconds=started + 400 - _now()))
+    await _exact(hass, freezer, timedelta(seconds=started + 400 - time.monotonic()))
     await _settle(hass, freezer)
     assert _health(coord) == HEALTH_HEALTHY, "the recovered vote is still standing"
     assert coord.data["state"] == MODE_HEAT, "and the dwell, once over, lets it through"

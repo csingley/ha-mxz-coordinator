@@ -53,6 +53,7 @@ from custom_components.mxz_coordinator.const import (
     ZONE_SENSOR,
 )
 from custom_components.mxz_coordinator.sensor import _ATTRS
+from tests.dwell import assert_restamped, expire_dwell
 from tests.flow_pages import open_options_page, prefilled, submit, suggested
 from tests.test_drive import (
     SENSOR_A,
@@ -1931,7 +1932,7 @@ async def test_d8b_mxz_own_off_and_unavailable_do_not_yield(hass: HomeAssistant)
     await hass.async_block_till_done()
     await f.compute()
     assert f.zone(1)["hands_off"] == "floor"
-    f.coord._last_mode_change_ts = 0.0
+    expire_dwell(f.coord)
     await f.compute()
     assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
 
@@ -2360,15 +2361,15 @@ async def test_scenario4_floor_beats_a_cooling_room_after_the_wait_then_hands_ba
     still demands cool."""
     f = await _setup(hass, hysteresis=None)
     await f.temp(SENSOR_A, 76)
-    f.coord._last_mode_change_ts = 0.0
+    long_ago = expire_dwell(f.coord)
     await f.temp(SENSOR_B, 45)
     assert (f.plan.state, _s(hass, f.a), _s(hass, f.b)) == ("heat", "fan_only", "heat")
     assert f.plan.attributes["mode_by_hands_off"] is False
-    assert f.coord._last_mode_change_ts > 0.0  # the flip starts the wait
+    assert_restamped(f.coord, long_ago)  # the flip starts the wait
     await f.temp(SENSOR_A, 72)  # inside its demand band, still engaged
     assert f.plan.attributes["primary_engage"] == "cool"
     await f.temp(SENSOR_B, 53)
-    f.coord._last_mode_change_ts = 0.0
+    expire_dwell(f.coord)
     await f.compute()
     assert (f.plan.state, _s(hass, f.a)) == ("heat", "fan_only")  # no demand: rests
     await f.temp(SENSOR_A, 74)  # demands cool again
@@ -2386,11 +2387,11 @@ async def test_a_floor_flip_clears_a_vote_carried_mode(hass: HomeAssistant) -> N
     await f.compute()
     assert (f.plan.state, f.plan.attributes["mode_by_hands_off"]) == ("heat", True)
     assert f.coord._mode_by_votes is True
-    f.coord._last_mode_change_ts = 0.0
+    long_ago = expire_dwell(f.coord)
     await f.temp(SENSOR_A, 88)
     assert (f.plan.state, f.plan.attributes["mode_by_hands_off"]) == ("cool", False)
     assert f.coord._mode_by_votes is False
-    assert f.coord._last_mode_change_ts > 0.0
+    assert_restamped(f.coord, long_ago)
 
 
 async def test_flapping_sensor_reverses_the_compressor_at_most_once_per_wait(
@@ -2401,7 +2402,7 @@ async def test_flapping_sensor_reverses_the_compressor_at_most_once_per_wait(
     reversal, and the living room parks at most once."""
     f = await _setup(hass, hysteresis=None)
     await f.temp(SENSOR_A, 76)
-    f.coord._last_mode_change_ts = 0.0
+    expire_dwell(f.coord)
     sent = _mode_commands(hass, f.a)
     seen = []
     for value in (49, 51, 49.5, 53, 49, 54, 48.5, 55, 49.9, 60):
@@ -2409,7 +2410,7 @@ async def test_flapping_sensor_reverses_the_compressor_at_most_once_per_wait(
         seen.append(f.plan.state)
     assert _reversals(seen, "cool") <= 1
     assert sent.count("fan_only") <= 1
-    f.coord._last_mode_change_ts = 0.0
+    expire_dwell(f.coord)
     await f.compute()
     assert (f.plan.state, _s(hass, f.a)) == ("cool", "cool")
 
@@ -2423,7 +2424,7 @@ async def test_d4_a_flapping_unusable_sensor_reverses_at_most_once_per_wait(
     compressor reverses at most once per wait."""
     f = await _setup(hass, hysteresis=None)
     await f.temp(SENSOR_A, 76)
-    f.coord._last_mode_change_ts = 0.0
+    expire_dwell(f.coord)
     seen, floor_states = [], []
     for value in (45, "unavailable", 45, "unknown", 44, "unavailable", 45):
         if isinstance(value, str):

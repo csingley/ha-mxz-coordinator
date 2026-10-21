@@ -44,6 +44,7 @@ from custom_components.mxz_coordinator.const import (
     ZONE_VANE_VERTICAL,
 )
 
+from .dwell import expire_dwell
 from .test_drive import MockHead, _eid, _set_temp
 
 
@@ -248,7 +249,7 @@ async def test_six_zone_drive(hass: HomeAssistant) -> None:
     # blocked by hysteresis... but the first flip is always allowed (epoch 0),
     # and we already flipped nothing (started cool). Force allowed by zeroing.
     await _set_temp(hass, sensors[0], 70)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await coord.async_refresh()
     await hass.async_block_till_done()
     assert hass.states.get(_eid(hass, entry, "_plan")).state == "heat"

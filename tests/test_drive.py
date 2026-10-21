@@ -59,6 +59,7 @@ from custom_components.mxz_coordinator.const import (
     INHIBIT_ACTION_FAN_ONLY,
     INHIBIT_ACTION_OFF,
 )
+from tests.dwell import expire_dwell
 
 SENSOR_A = "sensor.room_a_temp"
 SENSOR_B = "sensor.room_b_temp"
@@ -281,7 +282,7 @@ async def test_heat_lockout_suppresses_then_floors(hass: HomeAssistant) -> None:
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     # Hysteresis arms at startup now (#6): age the clock so this test's flip is allowed.
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
 
     for suffix in (
         "_primary_enable", "_secondary_enable", "_coordinator_enable", "_heat_lockout",
@@ -1662,7 +1663,7 @@ async def test_engage_latch_survives_shared_mode_flip(hass: HomeAssistant) -> No
 
     # B goes cold enough to DEMAND heat; hysteresis elapsed -> shared mode flips.
     await _set_temp(hass, SENSOR_B, 55)
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     assert hass.states.get(head_b).state == "heat"
     # A's run is parked (mode mismatch), but the latch remembers it...
@@ -1673,7 +1674,7 @@ async def test_engage_latch_survives_shared_mode_flip(hass: HomeAssistant) -> No
     # ...so when the shared mode returns to cool (B now too warm), A — still at
     # 63.5, INSIDE the deadband — resumes straight to its target.
     await _set_temp(hass, SENSOR_B, 67)
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     assert hass.states.get(head_a).state == "cool"
 

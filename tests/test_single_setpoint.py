@@ -30,6 +30,7 @@ from custom_components.mxz_coordinator.const import (
     DOMAIN,
 )
 
+from .dwell import expire_dwell
 from .test_drive import MockHead, _eid, _set_temp
 
 
@@ -171,7 +172,7 @@ async def test_hysteresis_armed_from_startup(hass: HomeAssistant) -> None:
     assert plan.attributes["seconds_since_mode_change"] < 3600  # not ~56,000 years
 
     # Once the clock ages past the dwell, the flip goes through.
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert hass.states.get(_eid(hass, entry, "_plan")).state == "heat"

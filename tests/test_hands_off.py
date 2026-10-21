@@ -62,6 +62,7 @@ from custom_components.mxz_coordinator.logic import (
     arbitrate,
     shared_mode,
 )
+from tests.dwell import assert_restamped, expire_dwell
 from tests.flow_pages import default, open_options_page, prefilled, submit
 from tests.test_drive import (
     SENSOR_A,
@@ -671,7 +672,7 @@ async def test_safety_priority_vote_preempts_an_enabled_demand(hass: HomeAssista
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()  # the option change reloads the entry
-    entry.runtime_data._last_mode_change_ts = 0.0  # hysteresis long elapsed
+    expire_dwell(entry.runtime_data)  # hysteresis long elapsed
     await _recompute(hass, entry)
 
     plan = _plan(hass, entry)
@@ -706,13 +707,13 @@ async def test_disabled_primary_never_idles_an_enabled_room(hass: HomeAssistant)
     await _recompute(hass, entry)
     assert (_s(hass, head_a), _s(hass, head_b)) == ("off", "cool")
     coord = entry.runtime_data
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _remote(hass, head_a, "heat")
     seen = []
     for _ in range(4):
         await _recompute(hass, entry)
         seen.append((_plan(hass, entry).state, _s(hass, head_a), _s(hass, head_b)))
-        coord._last_mode_change_ts = 0.0  # hysteresis long elapsed every cycle
+        expire_dwell(coord)  # hysteresis long elapsed every cycle
     assert seen == [("cool", "heat", "cool")] * 4
 
 
@@ -725,13 +726,13 @@ async def test_vote_decides_only_when_no_enabled_room_calls(hass: HomeAssistant)
     )
     coord = entry.runtime_data
     await _recompute(hass, entry)  # park lands
-    coord._last_mode_change_ts = 0.0
+    long_ago = expire_dwell(coord)
     await _remote(hass, head_b, "heat")
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
     assert plan.state == "heat"
     assert coord.current_shared_mode == "heat"
-    assert coord._last_mode_change_ts == 0.0  # the vote stamped nothing
+    assert coord._last_mode_change_ts == long_ago  # the vote stamped nothing
     assert _s(hass, head_a) == "fan_only"  # satisfied primary idles as always
     # The enabled primary now needs cooling: the dwell does not hold it back.
     await _set_temp(hass, SENSOR_A, 76)
@@ -753,19 +754,19 @@ async def test_return_to_rest_after_a_vote_starts_no_dwell(hass: HomeAssistant) 
     )
     coord = entry.runtime_data
     await _recompute(hass, entry)
-    coord._last_mode_change_ts = 0.0
+    long_ago = expire_dwell(coord)
     await _remote(hass, head_b, "heat")
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "heat"
     await _remote(hass, head_b, "off")
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "cool"
-    assert coord._last_mode_change_ts == 0.0
+    assert coord._last_mode_change_ts == long_ago
     await _set_temp(hass, SENSOR_A, 64)  # the enabled primary needs heat
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "heat"
     assert _s(hass, head_a) == "heat"
-    assert coord._last_mode_change_ts > 0.0  # an enabled room's flip is stamped
+    assert_restamped(coord, long_ago)  # an enabled room's flip is stamped
 
 
 async def test_plan_shows_mode_by_hands_off(hass: HomeAssistant) -> None:
@@ -779,7 +780,7 @@ async def test_plan_shows_mode_by_hands_off(hass: HomeAssistant) -> None:
     coord = entry.runtime_data
     await _recompute(hass, entry)  # park lands
     assert _plan(hass, entry).attributes["mode_by_hands_off"] is False
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _remote(hass, head_b, "heat")
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
@@ -804,7 +805,7 @@ async def test_plan_shows_mode_by_hands_off_through_the_undo(hass: HomeAssistant
     )
     coord = entry.runtime_data
     await _recompute(hass, entry)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _remote(hass, head_b, "heat")
     seen = []
     for _ in range(2):
@@ -825,7 +826,7 @@ async def test_opted_out_plan_shows_mode_by_hands_off_false(hass: HomeAssistant)
         hass, enable=("_primary_enable", "_coordinator_enable"), hysteresis=None,
     )
     await _recompute(hass, entry)
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     seen = [_plan(hass, entry).attributes["mode_by_hands_off"]]
     await _set_temp(hass, SENSOR_A, 64)  # the primary needs heat: a real flip
     await _recompute(hass, entry)
@@ -856,8 +857,8 @@ async def test_opted_out_run_at_rest_starts_no_dwell(hass: HomeAssistant) -> Non
         **{CONF_RESTING_MODE_BIAS: "cool"},
     )
     await _recompute(hass, entry)
-    entry.runtime_data._last_mode_change_ts = 0.0
-    assert await _cool_then_heat_at_rest(hass, entry, head_a) == 0.0
+    long_ago = expire_dwell(entry.runtime_data)
+    assert await _cool_then_heat_at_rest(hass, entry, head_a) == long_ago
     assert _plan(hass, entry).state == "heat"
     assert _s(hass, head_a) == "heat"
 
@@ -871,7 +872,7 @@ async def test_run_at_rest_after_a_vote_undo_starts_no_dwell(hass: HomeAssistant
     )
     coord = entry.runtime_data
     await _recompute(hass, entry)  # park lands
-    coord._last_mode_change_ts = 0.0
+    long_ago = expire_dwell(coord)
     await _remote(hass, head_b, "heat")
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "heat"
@@ -879,7 +880,7 @@ async def test_run_at_rest_after_a_vote_undo_starts_no_dwell(hass: HomeAssistant
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "cool"
     assert coord._mode_by_votes is False
-    assert await _cool_then_heat_at_rest(hass, entry, head_a) == 0.0
+    assert await _cool_then_heat_at_rest(hass, entry, head_a) == long_ago
     assert _plan(hass, entry).state == "heat"
     assert _s(hass, head_a) == "heat"
 
@@ -894,15 +895,15 @@ async def test_enabled_run_in_the_voted_mode_stamps_the_dwell(hass: HomeAssistan
     )
     coord = entry.runtime_data
     await _recompute(hass, entry)  # park lands
-    coord._last_mode_change_ts = 0.0
+    long_ago = expire_dwell(coord)
     await _remote(hass, head_b, "heat")
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "heat"
-    assert coord._last_mode_change_ts == 0.0  # the vote alone stamps nothing
+    assert coord._last_mode_change_ts == long_ago  # the vote alone stamps nothing
     await _set_temp(hass, SENSOR_A, 64)  # the enabled primary needs heat too
     await _recompute(hass, entry)
     assert _s(hass, head_a) == "heat"
-    assert coord._last_mode_change_ts > 0.0  # our heat run owns the mode now
+    assert_restamped(coord, long_ago)  # our heat run owns the mode now
     assert coord._mode_by_votes is False
     await _remote(hass, head_b, "off")  # the person stops; only our run remains
     await _set_temp(hass, SENSOR_A, 76)  # seconds later the primary needs cool
@@ -925,7 +926,7 @@ async def test_rest_after_an_enabled_run_in_the_voted_mode_is_dwelled(
     )
     coord = entry.runtime_data
     await _recompute(hass, entry)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _remote(hass, head_b, "heat")
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "heat"
@@ -939,12 +940,12 @@ async def test_rest_after_an_enabled_run_in_the_voted_mode_is_dwelled(
     assert plan.attributes["primary_engage"] not in ("cool", "heat")
     assert plan.state == "heat"  # rest waits out the dwell
     assert plan.attributes["mode_change_allowed"] is False
-    coord._last_mode_change_ts = 0.0  # the dwell has run out
+    long_ago = expire_dwell(coord)  # the dwell has run out
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
     assert plan.state == "cool"
     assert coord._mode_by_votes is False
-    assert coord._last_mode_change_ts > 0.0  # the return to rest is stamped
+    assert_restamped(coord, long_ago)  # the return to rest is stamped
 
 
 async def test_vote_never_breaks_an_engaged_run(hass: HomeAssistant) -> None:
@@ -959,7 +960,7 @@ async def test_vote_never_breaks_an_engaged_run(hass: HomeAssistant) -> None:
     await _recompute(hass, entry)
     assert _s(hass, head_a) == "cool"
     await _set_temp(hass, SENSOR_A, 71)  # inside the demand band, still above target
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _remote(hass, head_b, "heat")
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
@@ -979,7 +980,7 @@ async def test_only_heat_and_cool_vote(hass: HomeAssistant) -> None:
     await _recompute(hass, entry)
     head = _head(hass, head_b)
     for mode in ("fan_only", "dry", "auto", "heat_cool", "off", "unavailable"):
-        coord._last_mode_change_ts = 0.0
+        expire_dwell(coord)
         if mode == "unavailable":
             hass.states.async_set(head_b, "unavailable")
         else:
@@ -1005,7 +1006,7 @@ async def test_no_vote_before_the_park_lands(hass: HomeAssistant) -> None:
         raise HomeAssistantError("invented rejection")
 
     head.async_set_hvac_mode = reject
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _switch(hass, _eid(hass, entry, "_coordinator_enable"), True)
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
@@ -1074,7 +1075,7 @@ async def test_safety_vote_over_an_engaged_run_parks_it_and_stamps_the_dwell(
     entry, head_a, head_b = await _safety_setup(hass)
     coord = entry.runtime_data
     await _primary_coasting_in_band(hass, entry, head_a, head_b)
-    coord._last_mode_change_ts = 0.0  # the last flip's wait has long run out
+    long_ago = expire_dwell(coord)  # the last flip's wait has long run out
     sent = _mode_commands(hass, head_a)
     hass.states.async_set(SAFETY_B, "on")
     await _recompute(hass, entry)
@@ -1083,7 +1084,7 @@ async def test_safety_vote_over_an_engaged_run_parks_it_and_stamps_the_dwell(
     assert plan.attributes["mode_by_safety"] is True
     assert plan.attributes["mode_by_hands_off"] is False  # a flip of ours
     assert (_s(hass, head_a), sent) == ("fan_only", ["fan_only"])  # the run is parked
-    assert coord._last_mode_change_ts > 0.0  # ...and the park starts the wait
+    assert_restamped(coord, long_ago)  # ...and the park starts the wait
     assert coord._mode_by_votes is False
 
 
@@ -1099,7 +1100,7 @@ async def test_flapping_safety_sensor_vs_an_engaged_run_reverses_once_per_wait(
     entry, head_a, head_b = await _safety_setup(hass, **extra)
     coord = entry.runtime_data
     await _primary_coasting_in_band(hass, entry, head_a, head_b)
-    coord._last_mode_change_ts = 0.0
+    long_ago = expire_dwell(coord)
     sent = _mode_commands(hass, head_a)
     seen: list[str] = []
 
@@ -1109,8 +1110,8 @@ async def test_flapping_safety_sensor_vs_an_engaged_run_reverses_once_per_wait(
 
     hass.states.async_set(SAFETY_B, "on")
     await step()
+    assert_restamped(coord, long_ago)  # the park started the wait
     stamp = coord._last_mode_change_ts
-    assert stamp > 0.0  # the park started the wait
     hass.states.async_set(SAFETY_B, "off")
     await step()
     await _set_temp(hass, SENSOR_A, 74)  # the parked room calls cool again
@@ -1125,7 +1126,7 @@ async def test_flapping_safety_sensor_vs_an_engaged_run_reverses_once_per_wait(
     assert sent == ["fan_only"]
     assert _plan(hass, entry).attributes["mode_change_allowed"] is False
 
-    coord._last_mode_change_ts = 0.0  # the wait runs out, the sensor still off
+    expire_dwell(coord)  # the wait runs out, the sensor still off
     await _recompute(hass, entry)
     assert (_plan(hass, entry).state, _s(hass, head_a)) == ("cool", "cool")
     assert sent == ["fan_only", "cool"]
@@ -1138,7 +1139,7 @@ async def test_flapping_safety_sensor_vs_a_calling_room_reverses_once_per_wait(
     entry, head_a, head_b = await _safety_setup(hass, **{CONF_RESTING_MODE_BIAS: MODE_COOL})
     coord = entry.runtime_data
     await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     sent = _mode_commands(hass, head_a)
     seen = []
     for toggle in ("on", "off", "on", "off"):
@@ -1167,17 +1168,17 @@ async def test_a_dwelled_safety_clear_arms_the_wakeup(
         await _primary_coasting_in_band(hass, entry, head_a, head_b)
     else:
         await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
-    coord._last_mode_change_ts = 0.0
+    long_ago = expire_dwell(coord)
     hass.states.async_set(SAFETY_B, "on")
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "heat"
-    assert coord._last_mode_change_ts > 0.0
+    assert_restamped(coord, long_ago)
     hass.states.async_set(SAFETY_B, "off")
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
     assert (plan.state, plan.attributes["mode_change_allowed"]) == ("heat", False)
     assert coord._dwell_timer is not None
-    coord._last_mode_change_ts = 0.0  # the wait runs out
+    expire_dwell(coord)  # the wait runs out
     await _recompute(hass, entry)
     assert (_plan(hass, entry).state, _s(hass, head_a)) == ("cool", "cool")
 
@@ -1194,7 +1195,7 @@ async def test_only_an_on_safety_sensor_claims_priority(
     if sensor_state is not None:
         hass.states.async_set(SAFETY_B, sensor_state)
     await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
     assert (plan.state, _s(hass, head_a)) == ("cool", "cool")
@@ -1218,7 +1219,7 @@ async def test_safety_sensor_creates_no_want(hass: HomeAssistant) -> None:
     hass.states.async_set(SAFETY_B, "on")
     await _set_temp(hass, SENSOR_A, 76)
     await _set_temp(hass, SENSOR_B, 60)  # the held-off secondary is cold
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
     assert (plan.state, _s(hass, head_a), _s(hass, head_b)) == ("cool", "cool", "off")
@@ -1233,7 +1234,7 @@ async def test_safety_sensor_creates_no_want(hass: HomeAssistant) -> None:
     # Back inside its band it still runs to target, but calls nothing: the
     # primary's call takes the mode once the wait has run out.
     await _set_temp(hass, SENSOR_B, 68)
-    coord._last_mode_change_ts = 0.0
+    expire_dwell(coord)
     await _recompute(hass, entry)
     plan = _plan(hass, entry)
     assert (plan.attributes["secondary_demand"], plan.attributes["secondary_engage"]) == (
@@ -1252,7 +1253,7 @@ async def test_standby_hold_silences_a_safety_vote(hass: HomeAssistant) -> None:
     )
     await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
     hass.states.async_set(SAFETY_B, "on")
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     await _recompute(hass, entry)
     assert _plan(hass, entry).state == "heat"
     hass.states.async_set(INHIBIT, "on")
@@ -1277,7 +1278,7 @@ async def test_safety_sensor_alone_moves_the_plan_until_unload(hass: HomeAssista
     entry, _a, head_b = await _safety_setup(hass)
     assert _tracked(hass, SAFETY_B) == 1
     await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     hass.states.async_set(SAFETY_B, "on")
     for _ in range(3):
         await hass.async_block_till_done()
@@ -1304,7 +1305,7 @@ async def test_options_reload_subscribes_and_drops_the_safety_sensor(
     await hass.async_block_till_done()
     assert _tracked(hass, SAFETY_B) == 1
     await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
-    entry.runtime_data._last_mode_change_ts = 0.0
+    expire_dwell(entry.runtime_data)
     hass.states.async_set(SAFETY_B, "on")
     for _ in range(3):
         await hass.async_block_till_done()
