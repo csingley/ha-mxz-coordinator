@@ -57,16 +57,24 @@ an install with no floor set, `mode_by_floor` is always false and every room's
 A room's enable switch keeps a floor run (and a hands-off room's stand-down after a
 person's change, and the mode and setpoints of a person's own run that the floor took
 over, `floor_prior`) in its restore data, beside `hands_off_released`, only while one
-exists. A room with no floor stores exactly what it stored before these settings
-existed.
+exists. The run's record (`floor_run`) includes `window`: the readings from the last
+hour of driving that a stalled run's re-arm line is measured from, as
+`[driven seconds, reading]` pairs. A record written by an earlier 3.7.0 build, with no
+`window` (or one that cannot be read), is still restored; its window starts again
+from the next reading. A room with no floor stores exactly what it stored before
+these settings existed.
 
-Floor notices go to **Notify on drift**. With no notification service set they are
-Home Assistant notifications (`persistent_notification.create`) with the id
+Floor notices go to **Notify on drift**. With no notification service set, or one
+Home Assistant does not have (the call raises `ServiceNotFound`), they are Home
+Assistant notifications (`persistent_notification.create`) with the id
 `mxz_coordinator_<entry id>_floor_<room key>_<kind>`, where the room key is, for
-example, `secondary` and `<kind>` is `trip`, `blind`, `stalled` or `rejected`, so a
-repeat replaces the last. At most one floor notice goes out per room per hour; one
-held back is logged as a warning. Nothing about notices is stored, so a restart starts
-the hour afresh.
+example, `secondary` and `<kind>` is `trip`, `blind`, `stalled`, `rejected` or
+`handback` (a head that refused to be handed back to its person twice), so a repeat
+replaces the last. The drift notice itself still goes only to the configured service.
+At most one floor notice goes out per room per hour; one held back is logged as a
+warning and sent after the hour if it is still true then. Nothing about notices, and
+no pending hand-back retry, is stored, so a restart starts the hour afresh and drops
+a held-back notice.
 
 See [Freeze floor and overheat ceiling](../README.md#freeze-floor-and-overheat-ceiling).
 
