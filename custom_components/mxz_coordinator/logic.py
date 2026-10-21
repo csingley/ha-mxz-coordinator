@@ -516,8 +516,8 @@ class FloorRun:
     ``mark`` is the best reading credited this run (highest for heat, lowest
     for cool), moved only by a whole ``step``; ``driven`` is how many seconds
     MXZ has driven the head in the floor's direction since the mark last
-    moved; ``worst`` is the run's worst reading (lowest for heat), kept after
-    a stall so only a genuinely new low re-arms it.
+    moved; ``worst`` is the run's worst reading (lowest for heat), frozen once
+    the run stalls, so only a genuinely new low re-arms it.
     """
 
     direction: str
@@ -537,16 +537,18 @@ def floor_progress(
     ``step`` past the mark moves the mark there and restarts the clock; a
     clock that reaches ``cap`` stalls the run. A stalled run re-arms (as a
     new run) only on a reading one step past its worst one; reaching the
-    clear line is the caller's other way out (:func:`floor_call`). A sensor
-    flickering between two adjacent values does neither.
+    clear line is the caller's other way out (:func:`floor_call`). ``worst``
+    is frozen while stalled, so a room that keeps cooling in sub-step
+    increments re-arms once it is one step below it. A sensor flickering
+    between two adjacent values does neither.
     """
     sign = 1.0 if run.direction == MODE_HEAT else -1.0
-    gained = sign * (temp - run.mark) >= step - 1e-9
-    worst = run.worst if sign * (temp - run.worst) >= 0 else temp
     if run.stalled:
         if sign * (run.worst - temp) >= step - 1e-9:
             return FloorRun(direction=run.direction, mark=temp, worst=temp)
-        return replace(run, worst=worst)
+        return run
+    gained = sign * (temp - run.mark) >= step - 1e-9
+    worst = run.worst if sign * (temp - run.worst) >= 0 else temp
     if gained:
         return replace(run, mark=temp, worst=worst, driven=0.0)
     driven = run.driven + max(driven_for, 0.0)

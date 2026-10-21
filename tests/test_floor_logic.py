@@ -151,6 +151,27 @@ def test_a_new_low_rearms_a_stalled_run() -> None:
     assert rearmed == FloorRun(direction="heat", mark=43.0, worst=43.0)
 
 
+@pytest.mark.parametrize(
+    ("direction", "stall_at", "step_"),
+    [("heat", 44.0, 1.0), ("cool", 95.0, 1.0), ("heat", 7.0, 0.5), ("cool", 30.0, 0.5)],
+    ids=["floor_f", "ceiling_f", "floor_c", "ceiling_c"],
+)
+def test_a_gradual_slide_after_a_stall_rearms_at_one_full_step(direction, stall_at, step_) -> None:
+    """Decision 11 (ii): the worst reading is frozen while stalled, so a room
+    that keeps going the wrong way in tenths (colder for a floor, hotter for
+    a ceiling) re-arms exactly one step past it: not a tenth sooner, and not
+    never, which is what chasing each sub-step low would do."""
+    away = -1.0 if direction == "heat" else 1.0
+    run = step(run_for(direction, stall_at), stall_at, 2 * HOUR, step_)
+    assert run.stalled is True
+    for tenths in range(1, round(step_ * 10)):
+        temp = round(stall_at + away * tenths / 10, 1)
+        run = step(run, temp, 0, step_)
+        assert (run.stalled, run.worst) == (True, stall_at), temp
+    temp = round(stall_at + away * step_, 1)
+    assert step(run, temp, 0, step_) == FloorRun(direction=direction, mark=temp, worst=temp)
+
+
 def test_ceiling_cap_mirrors_with_a_new_high() -> None:
     """Decision 11 (ceiling): progress is falling; a stalled ceiling re-arms
     only on a new high one step above its highest reading."""

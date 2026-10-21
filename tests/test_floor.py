@@ -744,6 +744,39 @@ async def test_d11_dead_sensor_flicker_stays_blind_and_a_new_low_rearms(
     assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
 
 
+@pytest.mark.parametrize(
+    ("metric", "trip", "slide", "rearm", "mode", "notice"),
+    [
+        (False, 45.0, (44.9, 44.5, 44.1), 44.0, "heat", "below its freeze floor"),
+        (False, 92.0, (92.1, 92.5, 92.9), 93.0, "cool", "above its overheat ceiling"),
+        (True, 9.0, (8.9, 8.6), 8.5, "heat", "below its freeze floor"),
+        (True, 33.0, (33.1, 33.4), 33.5, "cool", "above its overheat ceiling"),
+    ],
+    ids=["floor_f", "ceiling_f", "floor_c", "ceiling_c"],
+)
+async def test_d11_a_room_that_keeps_going_the_wrong_way_after_a_stall_is_protected_again(
+    hass: HomeAssistant, freezer, metric, trip, slide, rearm, mode, notice
+) -> None:
+    """Decision 11 (ii): a run stalls (2 driven hours, no progress); the room
+    then really keeps cooling (warming, for a ceiling) in sub-step readings.
+    It stays blind and off until one full step (1 °F / 0.5 °C) past the
+    stall's worst reading, then MXZ runs the head again with a new trip
+    notice."""
+    floors = ((None, None), (10.0, 32.0) if metric else (50.0, 90.0))
+    f = await _setup(hass, metric=metric, floors=floors)
+    await f.temp(SENSOR_B, trip)
+    assert _s(hass, f.b) == mode
+    await _tick(hass, freezer, 2 * HOUR + timedelta(seconds=5))
+    await f.compute()
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off")
+    for value in slide:
+        await f.temp(SENSOR_B, value)
+        assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off"), value
+    await f.temp(SENSOR_B, rearm)
+    assert (f.floor(1), _s(hass, f.b)) == ((mode, None), mode)
+    assert len([n for n in f.notes if notice in n]) == 2
+
+
 async def test_d11_a_standoff_loser_is_not_stalled_by_waiting(hass: HomeAssistant, freezer) -> None:
     """Decision 11: the clock runs only while MXZ drives the head. A ceiling
     that loses to a freeze floor for 3 h is still tripped (held), and runs
