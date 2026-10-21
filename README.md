@@ -163,6 +163,16 @@ supported hardware and setup apply. It is not tested for parity with this integr
   [@csingley](https://github.com/csingley) in
   [#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32). See
   [Mode-change wait on a monotonic clock (3.7.1)](docs/MIGRATION.md#mode-change-wait-on-a-monotonic-clock-371).
+- **The coil-drying wait and the floor's own timers run on the same clock.** Three more
+  waits now count on that monotonic clock: the coil-drying wait of Off after drying, a
+  freeze floor or overheat ceiling's two hours of driving before it stalls, and the
+  limit of one floor notice per room per hour. A clock jump can no longer end any of
+  them early or hold it late, and time the host spends suspended doesn't count toward
+  them. No setting changes, and each behaves as before across a restart. A floor's
+  re-arm after a person takes the head back stays on the time of day, because it is
+  saved across a restart and shown as a time. These follow-on changes were made for
+  this release on the pattern of #32; they are not part of #32. See
+  [Coil-drying wait and floor timers on a monotonic clock (3.7.1)](docs/MIGRATION.md#coil-drying-wait-and-floor-timers-on-a-monotonic-clock-371).
 - 3.7.1 has not been tested on hardware.
 
 From 3.7.0:

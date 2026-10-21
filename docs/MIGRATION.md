@@ -18,6 +18,33 @@ on the same clock, so a time-of-day jump no longer moves it either.
 By [@csingley](https://github.com/csingley) in
 [#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32).
 
+## Coil-drying wait and floor timers on a monotonic clock (3.7.1)
+
+Three more waits that live in memory moved to `time.monotonic()` in the same way:
+
+- the coil-drying wait of **Off after drying** (fan only after cooling, then off);
+- a freeze floor or overheat ceiling's driven time, which stalls a run after two hours
+  of driving without a step of progress;
+- the limit of one floor notice per room per hour.
+
+A step in the host's time of day no longer ends any of them early or holds it late. On
+Linux the time the host spends suspended doesn't count toward them: a coil-drying wait
+under way at suspend keeps the fan running for the rest of its time after resume, and
+suspended time is neither charged as driving nor counted toward the notice hour.
+
+**Nothing to change.** No setting changes and nothing new is stored. After a restart a
+head found cooling or in fan only gets a full coil-drying wait from then, as before. A
+floor run's saved record keeps its driven time in seconds, as before, and downtime is
+still not charged. The notice limit starts afresh, as before.
+
+**Kept on the time of day:** a floor that yielded to a person re-arms at its clear line
+or four hours later. That time is saved in the room's enable switch and shown in the
+plan, so it stays on the wall clock, and a clock jump still moves it. Sensor freshness
+is measured from Home Assistant's own report times, so it stays on the wall clock too.
+
+These follow-on changes were made for this release on the pattern of #32; they are not
+part of #32.
+
 ## Safety priority (3.7.0)
 
 A per-room setting, **Safety priority**, in Configure → Rooms → (room): an optional
