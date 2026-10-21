@@ -885,8 +885,10 @@ When it does not act (fail safe):
   the head for **2 hours without 1 °F (0.5 °C) of new best reading** ends as `blind`
   (stalled), with a notice. Waiting for the mode, losing to a higher-ranked want, a
   standby hold and Coordinator off do not count. It is armed again only when the room
-  reaches the clear line or a new low (a new high for a ceiling), one full step past
-  its worst reading; a sensor flickering between two values does neither. A real but
+  reaches the clear line or a new low (a new high for a ceiling): one full step past
+  its worst reading since its last step of progress, so a room that heated from 40 °F
+  to 44 °F and then stalled is armed again at 43 °F. A sensor flickering between two
+  values does neither. A real but
   slow room cycles: 2 hours on, stalled until it falls another degree, on again, with a
   notice each time. A stuck sensor stays `blind` after one notice (one more after
   each Home Assistant restart).

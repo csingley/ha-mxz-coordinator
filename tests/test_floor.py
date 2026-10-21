@@ -808,6 +808,40 @@ async def test_d11_a_room_that_keeps_going_the_wrong_way_after_a_stall_is_protec
     assert len([n for n in f.notes if notice in n]) == 2
 
 
+@pytest.mark.parametrize(
+    ("metric", "trip", "gains", "back", "rearm", "mode"),
+    [
+        (False, 40.0, (41.0, 42.0, 43.0, 44.0), 43.5, 43.0, "heat"),
+        (False, 95.0, (94.0, 93.0, 92.0, 91.0), 91.5, 92.0, "cool"),
+        (True, 5.0, (5.5, 6.0, 6.5, 7.0), 6.8, 6.5, "heat"),
+        (True, 36.0, (35.5, 35.0, 34.5, 34.0), 34.2, 34.5, "cool"),
+    ],
+    ids=["floor_f", "ceiling_f", "floor_c", "ceiling_c"],
+)
+async def test_d11_a_run_that_gained_then_stalled_rearms_one_step_past_the_stall(
+    hass: HomeAssistant, freezer, metric, trip, gains, back, rearm, mode
+) -> None:
+    """Decision 11 (ii), "a new low one step below the lowest reading since
+    the stall": the guest room trips at 40 °F, MXZ heats it to 44 °F, then it
+    stops gaining and stalls (blind, head off). It slides back: half a step
+    stays blind; 43 °F runs the head again, far above the 40 °F trip reading.
+    Mirrored for a ceiling and in °C."""
+    floors = ((None, None), (10.0, 32.0) if metric else (50.0, 90.0))
+    f = await _setup(hass, metric=metric, floors=floors)
+    await f.temp(SENSOR_B, trip)
+    for value in gains:
+        await _tick(hass, freezer, timedelta(minutes=30))
+        await f.temp(SENSOR_B, value)
+        assert (f.floor(1), _s(hass, f.b)) == ((mode, None), mode), value
+    await _tick(hass, freezer, 2 * HOUR + timedelta(seconds=5))
+    await f.compute()
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off")
+    await f.temp(SENSOR_B, back)
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off")
+    await f.temp(SENSOR_B, rearm)
+    assert (f.floor(1), _s(hass, f.b)) == ((mode, None), mode)
+
+
 async def test_d11_a_standoff_loser_is_not_stalled_by_waiting(hass: HomeAssistant, freezer) -> None:
     """Decision 11: the clock runs only while MXZ drives the head. A ceiling
     that loses to a freeze floor for 3 h is still tripped (held), and runs

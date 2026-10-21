@@ -172,16 +172,44 @@ def test_a_gradual_slide_after_a_stall_rearms_at_one_full_step(direction, stall_
     assert step(run, temp, 0, step_) == FloorRun(direction=direction, mark=temp, worst=temp)
 
 
+@pytest.mark.parametrize(
+    ("direction", "trip", "best", "step_"),
+    [("heat", 40.0, 44.0, 1.0), ("cool", 95.0, 91.0, 1.0), ("heat", 5.0, 7.0, 0.5), ("cool", 36.0, 34.0, 0.5)],
+    ids=["floor_f", "ceiling_f", "floor_c", "ceiling_c"],
+)
+def test_a_run_that_gained_then_stalled_rearms_one_step_past_the_stall_not_the_trip(
+    direction, trip, best, step_
+) -> None:
+    """Decision 11 (ii), "one step below the lowest reading since the stall":
+    a floor trips at 40 °F, heats to 44 °F a step at a time, then stalls at
+    44. Sliding back half a step stays stalled; 43 °F re-arms it, although
+    the trip reading (40) is far below. Mirrored for a ceiling and in °C."""
+    toward = 1.0 if direction == "heat" else -1.0
+    run = run_for(direction, trip)
+    temp = trip
+    while temp != best:
+        temp = round(temp + toward * step_, 1)
+        run = step(run, temp, 600, step_)
+        assert (run.mark, run.driven) == (temp, 0.0)
+    run = step(run, best, 2 * HOUR, step_)
+    assert (run.stalled, run.worst) == (True, best)
+    half = round(best - toward * step_ / 2, 2)
+    assert step(run, half, 0, step_).stalled is True
+    rearm = round(best - toward * step_, 1)
+    assert step(run, rearm, 0, step_) == FloorRun(direction=direction, mark=rearm, worst=rearm)
+
+
 def test_ceiling_cap_mirrors_with_a_new_high() -> None:
     """Decision 11 (ceiling): progress is falling; a stalled ceiling re-arms
-    only on a new high one step above its highest reading."""
+    only on a new high one step above its highest reading since the stall
+    window began (the last gain), not since the trip."""
     run = run_for("cool", 95.0)
     run = step(run, 94.0, HOUR)
     assert (run.mark, run.driven) == (94.0, 0.0)
     run = step(run, 94.5, 2 * HOUR)
-    assert run.stalled is True and run.worst == 95.0
-    assert step(run, 95.5, 0).stalled is True
-    assert step(run, 96.0, 0) == FloorRun(direction="cool", mark=96.0, worst=96.0)
+    assert run.stalled is True and run.worst == 94.5
+    assert step(run, 95.0, 0).stalled is True
+    assert step(run, 95.5, 0) == FloorRun(direction="cool", mark=95.5, worst=95.5)
 
 
 def test_celsius_step_is_half_a_degree() -> None:
