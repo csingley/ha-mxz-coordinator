@@ -1,5 +1,23 @@
 # Upgrading and migrating MXZ Coordinator
 
+## Mode-change wait on a monotonic clock (3.7.1)
+
+The mode-change wait (**Minimum time between mode switches**) is timed on Python's
+`time.monotonic()` clock instead of the wall clock. A monotonic clock only counts
+forward, so a step in the host's time of day, from an NTP correction or a clock set by
+hand, no longer ends the wait early or holds it past its length. On Linux this clock
+stops while the host is suspended: a wait under way at suspend finishes after resume,
+where the wall clock would have counted the suspended time.
+
+**Nothing to change.** The setting, its default and the wait's length are the same, and
+nothing is stored: the wait's start lives in memory only, as before, and every start or
+reload begins a full wait. The plan sensor's `seconds_since_mode_change` and
+`mode_change_allowed` attributes keep their meaning; `seconds_since_mode_change` counts
+on the same clock, so a time-of-day jump no longer moves it either.
+
+By [@csingley](https://github.com/csingley) in
+[#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32).
+
 ## Safety priority (3.7.0)
 
 A per-room setting, **Safety priority**, in Configure → Rooms → (room): an optional
