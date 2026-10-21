@@ -63,7 +63,7 @@ Use [Reconfigure](#reconfigure-heads-rooms-and-sensors) to change the room list 
 
 - [What it does](#what-it-does), and
   [the problem it solves](#the-problem-stock-auto-starves-rooms)
-- [What's new in 3.6.0](#whats-new-in-360)
+- [What's new in 3.7.0](#whats-new-in-370)
 - [Before you install](#before-you-install) · [Install](#install)
 - [Set up your outdoor unit](#set-up-your-outdoor-unit) ·
   [If setup stops or warns](#if-setup-stops-or-warns)
@@ -149,27 +149,36 @@ supported hardware and setup apply. It is not tested for parity with this integr
 
 </details>
 
-## What's new in 3.6.0
+## What's new in 3.7.0
 
-- **Run one room from its own remote.** A new per-room setting, **Let its own remote
-  run it while disabled**, in Configure → Rooms → (room). With it on, disabling that
-  room sends `off` until the head reports `off`, then leaves the head to its own
-  remote, timer or app, across a restart too. The room tile shows what the head is
-  really doing, and its heat or cool counts in the shared direction below every
-  enabled room. Built from
+3.7.0 is not released yet.
+
+- **Safety priority.** A new, optional per-room setting in Configure → Rooms → (room):
+  a binary sensor. While it reads `on`, that room's own heat or cool want outranks
+  every other room's, including an enabled room that is calling or still running to
+  its target. It only raises a want the room already has; it never starts heat or cool
+  by itself, so it is not freeze protection. Designed and written by
+  [@csingley](https://github.com/csingley) in
+  [#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31). See
+  [Safety priority](#safety-priority).
+- **Upgrading changes nothing.** The setting is unset for every room, including every
+  room of an existing install, and a room without it behaves exactly as in 3.6.0.
+  There is no migration. See
+  [Safety priority (3.7.0)](docs/MIGRATION.md#safety-priority-370).
+- 3.7.0 has not been tested on hardware.
+
+From 3.6.0:
+
+- **Run one room from its own remote**, built from
   [@csingley](https://github.com/csingley)'s
   [#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27) and
-  [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28). See
-  [Run one room from its own remote](#run-one-room-from-its-own-remote).
-- **Upgrading changes nothing.** The setting is off for every room, including every room
-  of an existing install, so a disabled room is held off exactly as before until you
-  turn it on. There is no migration. See
+  [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28): with **Let its own
+  remote run it while disabled** on, disabling a room turns its head off, then leaves
+  it to its own remote; its heat or cool counts below every enabled room unless the
+  room is marked Safety priority. Off for every room until you turn it on, and
+  hardware-tested by @csingley on a 4-zone MXZ-4C36NA2. See
+  [Run one room from its own remote](#run-one-room-from-its-own-remote) and
   [Run one room from its own remote (3.6.0)](docs/MIGRATION.md#run-one-room-from-its-own-remote-360).
-- **Hardware-tested by [@csingley](https://github.com/csingley)** on a 4-zone
-  MXZ-4C36NA2: park on disable, own-remote control, a vote never outranks a real
-  demand, and a vote's flip starts no mode-change wait. The setting's label and the
-  plan's `mode_by_hands_off` attribute came from his feedback. Apple Home was not
-  tested on hardware.
 
 From 3.5.0:
 
@@ -734,19 +743,21 @@ With it on, when you disable that room (its switch, or its tile set to `off`):
   drying from its mode. In Apple Home that is the current state; the target, and so
   most likely the tile's label, stays Off.
 - If the head runs `heat` or `cool`, that counts in the shared direction, below every
-  enabled room. It decides the direction only when no enabled room is calling or still
-  running to its target, and a direction change it causes alone does not start the
-  mode-change wait, so an enabled room that then calls the other way is not held back
-  by it. Once an enabled room runs in the direction it chose, the wait starts, just as
-  if that room had chosen it. `sensor.*_plan` shows the head's vote in that room's
-  `hands_off_vote` (its `hands_off` reads `parking` or `released`), and `standoff` is
-  true when it and another room want opposite modes. The plan's top-level
-  `mode_by_hands_off` is true when the vote, not an enabled room, set the shared mode
-  on that update: no enabled room is calling and the vote picks a mode the enabled
-  rooms alone would not, or the mode goes back after the vote ends. Such a change
-  starts no mode-change wait. With **Resting mode** set to Cool or Heat it stays true
-  while the vote holds the mode away from rest; on Last used it is true only on the
-  update that makes the change. With no room opted in it is always false.
+  enabled room, unless the room is marked [Safety priority](#safety-priority) and that
+  sensor is `on`. Otherwise it decides the direction only when no enabled room is
+  calling or still running to its target, and a direction change it causes alone does
+  not start the mode-change wait, so an enabled room that then calls the other way is
+  not held back by it. Once an enabled room runs in the direction it chose, the wait
+  starts, just as if that room had chosen it. `sensor.*_plan` shows the head's vote in
+  that room's `hands_off_vote` (its `hands_off` reads `parking` or `released`), and
+  `standoff` is true when it and another room want opposite modes. The plan's
+  top-level `mode_by_hands_off` is true when the vote, not an enabled room, set the
+  shared mode on that update: no enabled room is calling or still running to its
+  target and the vote picks a mode the enabled rooms alone would not, or the mode goes
+  back after the vote ends. Such a change starts no mode-change wait. With **Resting
+  mode** set to Cool or Heat it stays true while the vote holds the mode away from
+  rest; on Last used it is true only on the update that makes the change. With no room
+  opted in it is always false.
 - A standby hold still holds this head too: at the hold's park mode, or `off` under
   an `eco` hold, for as long as the hold lasts. Afterwards the head is left alone
   again. MXZ does not "heal" this head out of `dry` or `auto`.
@@ -755,6 +766,45 @@ Two heads on one outdoor unit asking for opposite modes is still a standoff that
 outdoor unit settles its own way (see
 [the problem it solves](#the-problem-stock-auto-starves-rooms)): the room you run by
 hand can make an enabled room wait, or wait itself.
+
+### Safety priority
+
+Any room, enabled or run from its own remote, can be marked **Safety priority** in
+Configure → Rooms → (room): an optional binary sensor reference. It is unset for every
+room, so nothing changes until you wire one.
+
+While that sensor reads `on`, the room's want for heat or cool outranks every other
+room's, enabled or run from its own remote, regardless of room priority. That includes
+an enabled room that is calling or still running to its target, which an ordinary
+vote never overrides. If two rooms marked Safety priority are `on` and want opposite
+modes, room priority decides between them.
+
+Taking the direction from an enabled room that is calling or still running to its
+target parks that room's head, so it starts the mode-change wait like any other
+reversal: a sensor that flaps on and off cannot reverse the compressor twice inside one
+wait. Deciding the direction while no enabled room is calling or still running does not
+start the wait, the same as an ordinary vote. A wait already running still applies to
+the safety room's want too. `sensor.*_plan` shows each room's sensor in its
+`safety_priority`, and the top-level `mode_by_safety` is true while a room marked
+Safety priority is asserting and its want is the shared mode.
+
+What the sensor should mean:
+
+- **It raises a want the room already has, and creates none.** It only makes the
+  room's own heat or cool want win: an enabled room's call, or the heat or cool a head
+  run from its own remote is running. An enabled room that is not calling (including
+  one coasting to its target inside its band), or a head that is off, fan-only or
+  drying, has no want to raise, and the sensor does nothing for it. It never starts
+  heat or cool by itself, so it is not freeze protection.
+- **A standby hold still silences it.** The hold parks heads as usual, the safety
+  room's included, and a head run from its own remote is held and casts no vote.
+- **Only the exact state `on` counts.** `off`, `unavailable`, `unknown` or a missing
+  entity is no priority.
+- **A sensor stuck `on` keeps that room's want on top for as long as it is on**, and a
+  room wanting the other mode waits the whole time. Drive it from an automation or
+  template with a clear `off` condition, and consider what happens if it sticks.
+- Reserve it for a real floor or ceiling condition in that room, not everyday comfort:
+  an override that is on every day defeats the priority order.
 
 ### Who drives the fan
 
@@ -907,7 +957,8 @@ refer to priority slots, not permanent room identities.
 | Observation | Meaning and next step |
 | --- | --- |
 | `standoff`, demand/engage, mode dwell | Another room's priority or dwell may be holding the direction. Check targets and priority before changing a raw head. |
-| `mode_by_hands_off`, room `hands_off_vote` | True when a disabled room run from its own remote set the shared mode, with no enabled room calling; that change starts no mode-change wait. Always false with no room opted in. See [Run one room from its own remote](#run-one-room-from-its-own-remote). |
+| `mode_by_hands_off`, room `hands_off_vote` | True when a disabled room run from its own remote set the shared mode, with no enabled room calling or still running to its target, or the mode went back after its vote ended; that change starts no mode-change wait. Always false with no room opted in. See [Run one room from its own remote](#run-one-room-from-its-own-remote). |
+| `mode_by_safety`, room `safety_priority` | True while a room marked Safety priority is asserting and its want is the shared mode. Taking the mode from an enabled room that is calling or still running to its target starts the mode-change wait like any real reversal; deciding while no enabled room is calling or running does not. Always false with no sensor wired. See [Safety priority](#safety-priority). |
 | `inhibited`, room enable, lockouts, eco | A configured gate may be parking the room. Check the controlling switch/input. |
 | `sensor_health`, `sensor_age`, `sensors_ok` | Check validity and the freshness contract. Age of an HA write can differ from age of a sample. |
 | `fan_hold`, `control_reasons` | Check ownership, capability, restore and settings warnings with their suggested next step. |
@@ -1014,6 +1065,19 @@ off once, retrying until the head reports `off`. Then MXZ leaves it alone until 
 enable the room again, across restarts too. With the setting off (the default), a
 disabled room's head is held off, and MXZ turns it back off whenever someone turns it on.
 See [Run one room from its own remote](#run-one-room-from-its-own-remote).
+
+</details>
+
+<details>
+<summary><b>One room needs to win every time, not just by priority order</b></summary>
+
+Wire a `binary_sensor` to that room's **Safety priority** field in Configure → Rooms.
+While it reads exactly `on`, that room's want for heat or cool outranks every other
+room's, including an enabled room that is calling or still running to its target,
+which an ordinary vote from a room run on its own remote never overrides. It only
+raises a want the room already has; it never starts heat or cool by itself, so it is
+not freeze protection. Reserve it for a real floor or ceiling condition, not everyday
+comfort: it is an override, not a priority bump. See [Safety priority](#safety-priority).
 
 </details>
 
@@ -1226,7 +1290,7 @@ MXZ Coordinator got this good because people ran it on their own systems, found 
 - [@helicopterrun](https://github.com/helicopterrun) validated it on 3-zone hardware and did relentless, root-caused QA through the v3 beta ([#4](https://github.com/dkpnw/ha-mxz-coordinator/issues/4), [#5](https://github.com/dkpnw/ha-mxz-coordinator/issues/5), [#6](https://github.com/dkpnw/ha-mxz-coordinator/issues/6), [#7](https://github.com/dkpnw/ha-mxz-coordinator/issues/7)). Those reports led to the removal docs, single-setpoint head support and entry-scoped restore.
 - [@oliverbrandmueller](https://github.com/oliverbrandmueller) asked for metric units ([#2](https://github.com/dkpnw/ha-mxz-coordinator/issues/2)). Since 2.8.0 the coordinator runs in your Home Assistant temperature unit from end to end.
 - **mw1029** on the [Home Assistant forum](https://community.home-assistant.io/t/1018382) tried MXZ with the cloud-based `comfort_HA` integration and posted both entity dumps, which showed exactly where the two don't line up. Support for it is in progress.
-- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author, and he tested it on his own 4-zone MXZ-4C36NA2 before release. It shipped in 3.6.0.
+- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author, and he tested it on his own 4-zone MXZ-4C36NA2 before release. It shipped in 3.6.0. He then designed and wrote the safety-priority arbitration ([#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31)): every room's heat or cool want ranked in one priority order, with an optional per-room **Safety priority** sensor that lifts a room's own want above every other room's. It is set for 3.7.0, which is not released yet.
 
 **Prior art and references**
 

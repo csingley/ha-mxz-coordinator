@@ -24,7 +24,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.climate import ClimateEntityFeature
-from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, UnitOfTemperature
+from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, STATE_ON, UnitOfTemperature
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
@@ -127,6 +127,7 @@ from .const import (
     ZONE_MAX_AGE,
     ZONE_NAME,
     ZONE_REPORT_INTERVAL,
+    ZONE_SAFETY_PRIORITY_ENTITY,
     ZONE_SAMPLE_SEQUENCE_ATTR,
     ZONE_SAMPLE_TIMESTAMP_ATTR,
     ZONE_SENSOR,
@@ -138,6 +139,11 @@ from .const import (
     zone_slug,
 )
 from .logic import (
+    PRIORITY_DEMAND,
+    PRIORITY_SAFETY,
+    PRIORITY_VOTE,
+    Demand,
+    arbitrate,
     engage_with_latch,
     evidence_contract,
     fan_for_delta,
@@ -148,7 +154,6 @@ from .logic import (
     season_lockouts,
     sensor_health,
     setpoints,
-    shared_mode_with_votes,
 )
 
 if TYPE_CHECKING:
@@ -268,6 +273,11 @@ class Zone:
     drift: float | None = None
     # Hands-off opt-in (ZONE_HANDS_OFF), from config; only a stored True opts in.
     hands_off: bool = False
+    # Optional binary_sensor (ZONE_SAFETY_PRIORITY_ENTITY): "on" marks this
+    # zone's Demand PRIORITY_SAFETY for this tick, regardless of whether its
+    # direction comes from room_call() or a hands-off vote. Static wiring,
+    # same tier as climate_id/sensor_id, not a live-adjustable number.
+    safety_priority_entity: str | None = None
     # This SENSOR's reporting contract, as configured (durations in minutes,
     # or None when the room's cadence is unknown; the basis defaults to
     # unknown). Read once into the resolved freshness window and evidence
@@ -320,6 +330,7 @@ def _parse_zones(conf: dict[str, Any], target_default: float) -> list[Zone]:
             stage_sensor_id=z.get(ZONE_STAGE_SENSOR) or None,
             target=target_default,
             hands_off=z.get(ZONE_HANDS_OFF) is True,
+            safety_priority_entity=z.get(ZONE_SAFETY_PRIORITY_ENTITY) or None,
             report_interval=z.get(ZONE_REPORT_INTERVAL),
             max_age=z.get(ZONE_MAX_AGE),
             startup_grace=z.get(ZONE_STARTUP_GRACE),
@@ -783,6 +794,17 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             )
             self.hass.async_create_task(self._evaluate_inhibit())
+        # React to a safety-priority sensor immediately rather than waiting
+        # for the next unrelated temp report/heartbeat.
+        safety_entities = [
+            zone.safety_priority_entity for zone in self.zones if zone.safety_priority_entity
+        ]
+        if safety_entities:
+            self._unsubs.append(
+                async_track_state_change_event(
+                    self.hass, safety_entities, self._on_safety_change
+                )
+            )
         self._unsubs.append(async_at_start(self.hass, self._on_ha_start))
         await self.async_refresh()
 
@@ -866,9 +888,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         healths: list[str] = []
         ages: list[float | None] = []
         votes: list[str | None] = []
+        arb_demands: list[Demand] = []
         all_ok = True
         coasted = False
-        for zone in self.zones:
+        for i, zone in enumerate(self.zones):
             state = self.hass.states.get(zone.sensor_id)
             valid, temp = _read_temp(state, self.target_default, self.temp_unit)
             health, age = self._sensor_health(zone, state, valid, now)
@@ -935,9 +958,15 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # _sync_coast_timer). A disabled room (MODE_OFF) is not coasting.
             if prior_engage and engage == ENGAGE_SATISFIED:
                 coasted = True
+            vote = self._hands_off_vote(zone)
+            arb_demands.extend(
+                self._zone_arbitration_pair(
+                    demand=demand, vote=vote, safety=self._zone_safety(zone), index=i,
+                )
+            )
             demands.append(demand)
             engages.append(engage)
-            votes.append(self._hands_off_vote(zone))
+            votes.append(vote)
             healths.append(health)
             ages.append(age)
             plan[f"{zone.slug}_demand"] = demand
@@ -955,14 +984,15 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current = self._arbitration_mode()
         elapsed = now - self._last_mode_change_ts
         allowed = elapsed >= self.hysteresis
-        state, by_votes = shared_mode_with_votes(
-            demands=demands,
-            engages=engages,
-            votes=votes,
+        engaged = any(e in (MODE_COOL, MODE_HEAT) for e in engages)
+        grant = arbitrate(
+            arb_demands,
+            engaged=engaged,
             current=current,
             allowed=allowed,
             resting=self._resting_bias(),
         )
+        state, by_votes = grant.direction, grant.read_only
         if (
             not by_votes and self._mode_by_votes and state != current
             and not any(c in (MODE_COOL, MODE_HEAT) for c in (*demands, *engages))
@@ -987,6 +1017,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "control_reasons": self._control_reasons(zone),
                         "hands_off": self._hands_off_phase(zone),
                         "hands_off_vote": votes[i],
+                        "safety_priority": self._zone_safety(zone),
                         **self.command_attributes(zone.climate_id),
                     }
                     for i, zone in enumerate(self.zones)
@@ -995,6 +1026,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # a hands-off head's included.
                 "standoff": MODE_COOL in calls and MODE_HEAT in calls,
                 "mode_by_hands_off": by_votes,
+                "mode_by_safety": grant.by_safety,
                 "sensors_ok": all_ok,
                 "seconds_since_mode_change": int(elapsed),
                 "mode_change_allowed": allowed,
@@ -1515,14 +1547,22 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._cancel_dwell_timer()  # this plan already had its free hand
             return
         current = self._arbitration_mode()
-        would_flip_to, _by_votes = shared_mode_with_votes(
-            demands=[plan[f"{zone.slug}_demand"] for zone in self.zones],
-            engages=[plan[f"{zone.slug}_engage"] for zone in self.zones],
-            votes=[view.get("hands_off_vote") for view in plan.get("zones", ())],
-            current=current,
-            allowed=True,
-            resting=self._resting_bias(),
-        )
+        views = plan.get("zones", ())
+        engages = [plan[f"{zone.slug}_engage"] for zone in self.zones]
+        engaged = any(e in (MODE_COOL, MODE_HEAT) for e in engages)
+        arb_demands: list[Demand] = []
+        for i, (zone, view) in enumerate(zip(self.zones, views)):
+            arb_demands.extend(
+                self._zone_arbitration_pair(
+                    demand=plan[f"{zone.slug}_demand"],
+                    vote=view.get("hands_off_vote"),
+                    safety=bool(view.get("safety_priority")),
+                    index=i,
+                )
+            )
+        would_flip_to = arbitrate(
+            arb_demands, engaged=engaged, current=current, allowed=True, resting=self._resting_bias(),
+        ).direction
         if would_flip_to == current:
             self._cancel_dwell_timer()  # nothing is waiting on this dwell
             return
@@ -1694,7 +1734,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # direction is the older one; the request keeps the selector and the
         # clock it already set, and the refresh it queued computes next.
         # A flip only hands-off heads asked for is not one the coordinator
-        # caused, so it starts no dwell (see shared_mode_with_votes). Once a
+        # caused, so it starts no dwell (see logic.arbitrate()). Once a
         # coordinated room runs in that mode, the mode is ours: stamp it then,
         # as if that room had flipped it, so the next reversal is dwelled.
         # The vote's undoing (back to the resting bias) starts no dwell either,
@@ -3278,6 +3318,43 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return head.state
         return None
 
+    @staticmethod
+    def _zone_arbitration_pair(
+        *, demand: str, vote: str | None, safety: bool, index: int,
+    ) -> tuple[Demand, Demand]:
+        """One zone's (demand, vote) as a pair of :class:`Demand` entries.
+
+        Shared by ``_compute`` (live) and ``_sync_dwell_timer`` (replayed from
+        the already-computed plan) so the priority-tier math lives in exactly
+        one place.
+        """
+        tier = PRIORITY_SAFETY if safety else None
+        return (
+            Demand(
+                direction=demand if demand in (MODE_COOL, MODE_HEAT) else None,
+                priority=(tier if tier is not None else PRIORITY_DEMAND, index),
+            ),
+            Demand(
+                direction=vote,
+                priority=(tier if tier is not None else PRIORITY_VOTE, index),
+                read_only=True,
+            ),
+        )
+
+    def _zone_safety(self, zone: Zone) -> bool:
+        """Whether this zone's Demand carries PRIORITY_SAFETY this tick.
+
+        Reads ``zone.safety_priority_entity`` (a binary_sensor) regardless of
+        enable/hands_off -- either a coordinated room's own demand or a
+        hands-off room's vote may be marked safety. Unset, missing, or any
+        state but exactly ``on`` (off, unavailable, unknown): False, i.e.
+        fail-safe -- no information, no override.
+        """
+        if zone.safety_priority_entity is None:
+            return False
+        state = self.hass.states.get(zone.safety_priority_entity)
+        return state is not None and state.state == STATE_ON
+
     def restore_hands_off(self, slug: str) -> None:
         """The enable switch restored a released hands-off room (see switch.py)."""
         self._hands_off_released.add(slug)
@@ -3433,6 +3510,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _on_inhibit_change(self, _event: Event) -> None:
         """The watched inhibit entity changed -> re-evaluate the hold."""
         self.hass.async_create_task(self._evaluate_inhibit())
+
+    @callback
+    def _on_safety_change(self, _event: Event) -> None:
+        """A zone's safety-priority sensor changed -> recompute now."""
+        self.hass.async_create_task(self.async_request_refresh())
 
     async def _evaluate_inhibit(self) -> None:
         """Re-read the inhibit entity; act only on a change of hold state.

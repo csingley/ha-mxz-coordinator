@@ -8,6 +8,7 @@ unit-tested directly.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any
 
 from .const import (
@@ -347,38 +348,122 @@ def shared_mode(
     return current
 
 
-def shared_mode_with_votes(
+# Demand.priority tiers: lower sorts first / wins a standoff. These are the
+# ONLY thing that encodes "a real demand beats a vote" -- it falls out of
+# comparing (PRIORITY_VOTE, i) > (PRIORITY_DEMAND, j) for any i, j, not a
+# hardcoded rule, which is what lets PRIORITY_SAFETY override either kind
+# without a special case (see arbitrate()'s docstring).
+PRIORITY_SAFETY = -1
+PRIORITY_DEMAND = 0
+PRIORITY_VOTE = 1
+
+
+@dataclass(frozen=True)
+class Demand:
+    """One zone's current want for the shared compressor's direction this tick.
+
+    ``direction`` is :data:`MODE_COOL`, :data:`MODE_HEAT`, or ``None`` (wants nothing).
+    ``priority`` is ``(tier, configured_index)``; lower sorts first.
+    ``read_only`` is True for an advisory want (a vote): it is never sent to the
+    voting head, though a safety vote that wins can still park another room's
+    head (see :class:`Grant`). False for a coordinated room's own demand.
+    """
+
+    direction: str | None
+    priority: tuple[int, int]
+    read_only: bool = False
+
+
+@dataclass(frozen=True)
+class Grant:
+    """The arbitrated outcome for one tick.
+
+    ``read_only`` is True only when THIS tick's answer differs from what it
+    would be considering commanding Demands alone (an advisory want is the
+    reason the answer moved, not merely that one happens to be active) AND
+    the ordinary vote gate was open: no commanding Demand had a direction
+    and no room was engaged. Such a flip runs no coordinated head into a
+    reversal, so it is exempt from the dwell stamp. A safety vote that moves
+    the answer while a coordinated room is calling or engaged mid-run parks
+    that room's head, so it reads False and is stamped like any other flip.
+    Once the answer settles (nothing is actively changing it any more), this
+    reads False again, even while a vote is still what the settled answer
+    agrees with -- there is nothing left to exempt from the dwell clock once
+    nothing is proposing a change.
+
+    ``by_safety`` is True while a PRIORITY_SAFETY Demand with a direction is
+    active and that direction is the answer. It does not claim the safety
+    tier changed the answer: the same answer may follow from order or the
+    dwell alone.
+    """
+
+    direction: str
+    read_only: bool
+    by_safety: bool
+
+
+def arbitrate(
+    demands: list[Demand],
     *,
-    demands: list[str],
-    engages: list[str],
-    votes: list[str | None],
+    engaged: bool,
     current: str,
     allowed: bool,
     resting: str | None = None,
-) -> tuple[str, bool]:
-    """:func:`shared_mode`, with hands-off heads' observed modes ranked last.
+) -> Grant:
+    """:func:`shared_mode`, generalized over a priority-ordered Demand list.
 
-    ``votes`` is what each hands-off head is actually running (cool|heat, else
-    None), in zone order. They decide ONLY when no coordinated room is calling:
-    no cool/heat demand and no engaged run. A room mid-run toward its target
-    is calling even when its demand is back inside the band, so a vote can
-    never take the mode from it.
+    Reproduces the original ``shared_mode_with_votes``'s precedence exactly
+    as the degenerate case where every Demand sits at PRIORITY_DEMAND or
+    PRIORITY_VOTE and none at PRIORITY_SAFETY. What it fixes: today's "a
+    real demand always fully preempts every vote, unconditionally" was a
+    hardcoded wall, not a priority relationship -- so a hands-off zone's
+    safety-tier vote could never preempt an enabled zone's merely-comfort
+    demand, no matter how urgently it needed to. Here a PRIORITY_SAFETY
+    Demand -- from EITHER a coordinated room or a hands-off vote -- outranks
+    every ordinary Demand structurally, because ``(-1, i) < (0, j)`` always,
+    not via a special case, and participates regardless of ``engaged`` or
+    whether anything else is commanding.
 
-    Returns ``(mode, by_votes)``; ``by_votes`` is True when the votes changed
-    the answer. Such a change is not a compressor reversal the coordinator
-    caused, so the caller does not stamp the mode-flip clock for it: an
-    enabled room calling afterwards is never held back by a dwell the votes
-    started.
+    ``engaged`` mirrors the original gate's other half: a room mid-run
+    toward its target (its own demand back inside the band, but still
+    engaged) must not have the mode taken from it by a mere vote, even
+    though its demand itself has gone quiet. It only ever suppresses an
+    ORDINARY vote (PRIORITY_VOTE, read_only) -- never a safety one.
     """
-    plain = shared_mode(
-        demands=demands, current=current, allowed=allowed, resting=resting
+    ranked = sorted(demands, key=lambda d: d.priority)
+    commanding = [d for d in ranked if not d.read_only]
+    safety_votes = [
+        d for d in ranked if d.read_only and d.priority[0] == PRIORITY_SAFETY
+    ]
+    ordinary_votes = [
+        d for d in ranked if d.read_only and d.priority[0] != PRIORITY_SAFETY
+    ]
+    commanding_silent = not any(d.direction for d in commanding)
+    gate_open = commanding_silent and not engaged
+    active = sorted(
+        commanding + safety_votes + (ordinary_votes if gate_open else []),
+        key=lambda d: d.priority,
     )
-    calls = (MODE_COOL, MODE_HEAT)
-    cast = [vote for vote in votes if vote in calls]
-    if not cast or any(call in calls for call in (*demands, *engages)):
-        return (plain, False)
-    voted = shared_mode(demands=cast, current=current, allowed=allowed, resting=resting)
-    return (voted, voted != plain)
+    full = shared_mode(
+        demands=[d.direction for d in active if d.direction],
+        current=current, allowed=allowed, resting=resting,
+    )
+    by_safety = any(
+        d.direction == full and d.priority[0] == PRIORITY_SAFETY for d in active
+    )
+    if not any(d.read_only and d.direction for d in active):
+        return Grant(direction=full, read_only=False, by_safety=by_safety)
+    plain = shared_mode(
+        demands=[d.direction for d in active if d.direction and not d.read_only],
+        current=current, allowed=allowed, resting=resting,
+    )
+    # Exempt from the dwell stamp only when the vote gate was open: no
+    # commanding room calling AND none still engaged mid-run. A safety vote
+    # that takes the mode from a calling room or from an engaged run that is
+    # coasting inside its band parks a running head -- a real reversal the
+    # coordinator causes -- so it stamps like any other flip.
+    read_only = full != plain and gate_open
+    return Grant(direction=full, read_only=read_only, by_safety=by_safety)
 
 
 def setpoints(

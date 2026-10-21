@@ -81,6 +81,7 @@ from .const import (
     ZONE_MAX_AGE,
     ZONE_NAME,
     ZONE_REPORT_INTERVAL,
+    ZONE_SAFETY_PRIORITY_ENTITY,
     ZONE_SAMPLE_SEQUENCE_ATTR,
     ZONE_SAMPLE_TIMESTAMP_ATTR,
     ZONE_SENSOR,
@@ -107,6 +108,9 @@ _VANE_SELECTOR = selector.EntitySelector(
 # `sensor` domain), so a sensor picker covers it.
 _STAGE_SELECTOR = selector.EntitySelector(
     selector.EntitySelectorConfig(domain="sensor")
+)
+_SAFETY_PRIORITY_SELECTOR = selector.EntitySelector(
+    selector.EntitySelectorConfig(domain="binary_sensor")
 )
 _ROOM_NAME_SELECTOR = selector.TextSelector()
 
@@ -552,6 +556,7 @@ _ROOM_WIRING_FIELDS = (
     ("stage", ZONE_STAGE_SENSOR),
     ("vane_vertical", ZONE_VANE_VERTICAL),
     ("vane_horizontal", ZONE_VANE_HORIZONTAL),
+    ("safety_priority_entity", ZONE_SAFETY_PRIORITY_ENTITY),
 )
 # The room page's hands-off opt-in (flow key); stored as ZONE_HANDS_OFF only
 # when on, so an opted-out room's record is exactly what it was before this option existed.
@@ -771,6 +776,10 @@ def _room_schema(view: dict[str, Any], expanded: bool = False) -> vol.Schema:
                 "vane_horizontal",
                 description={"suggested_value": view.get("vane_horizontal")},
             ): _VANE_SELECTOR,
+            vol.Optional(
+                "safety_priority_entity",
+                description={"suggested_value": view.get("safety_priority_entity")},
+            ): _SAFETY_PRIORITY_SELECTOR,
             vol.Optional(
                 _HANDS_OFF_FIELD, default=view.get(_HANDS_OFF_FIELD) is True
             ): selector.BooleanSelector(),

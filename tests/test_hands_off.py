@@ -12,12 +12,16 @@ behavior that ships:
 * opted IN: disabling sends off until the head is SEEN off, then the head is
   left alone until the room is enabled again — across a restart too. While a
   person runs it, the tile shows what the head is doing, and its heat/cool is
-  a vote in the shared mode that never outranks an enabled room.
+  a vote in the shared mode that never outranks an enabled room's demand or
+  run -- unless the room is marked Safety priority and that sensor is on.
+  A safety vote that takes the mode from an enabled room's demand or engaged
+  run parks that head, so it starts the mode-change wait like any flip.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from pathlib import Path
 
@@ -42,12 +46,22 @@ from custom_components.mxz_coordinator.const import (
     IDLE_ACTION_FAN_ONLY,
     INHIBIT_ACTION_ECO,
     INHIBIT_ACTION_OFF,
+    MODE_COOL,
+    MODE_HEAT,
     ZONE_CLIMATE,
     ZONE_HANDS_OFF,
     ZONE_NAME,
+    ZONE_SAFETY_PRIORITY_ENTITY,
     ZONE_SENSOR,
 )
-from custom_components.mxz_coordinator.logic import shared_mode_with_votes
+from custom_components.mxz_coordinator.logic import (
+    PRIORITY_DEMAND,
+    PRIORITY_SAFETY,
+    PRIORITY_VOTE,
+    Demand,
+    arbitrate,
+    shared_mode,
+)
 from tests.flow_pages import default, open_options_page, prefilled, submit
 from tests.test_drive import (
     SENSOR_A,
@@ -61,6 +75,7 @@ from tests.test_drive import (
 from tests.test_startup_continuity import _head, _shutdown, _startup, _switch
 
 INHIBIT = "binary_sensor.grid_down"
+SAFETY_B = "binary_sensor.secondary_safety"
 
 
 def _s(hass: HomeAssistant, entity_id: str) -> str:
@@ -86,6 +101,7 @@ async def _setup(
     enable: tuple[str, ...] = ("_primary_enable", "_secondary_enable", "_coordinator_enable"),
     hysteresis: int | None = 0,
     legacy_key: bool = True,
+    safety: tuple[str | None, str | None] = (None, None),
     **extra,
 ) -> tuple[MockConfigEntry, str, str]:
     """Two mock heads, both rooms at 70 / target 70.
@@ -93,19 +109,22 @@ async def _setup(
     ``hands_off`` opts each room in. A room left opted out stores NO key at
     all (``legacy_key``), exactly like every entry saved before the option
     existed; ``legacy_key=False`` stores an explicit False instead.
+    ``safety`` stores each room's Safety priority sensor, if any.
     """
     hass.config.units = US_CUSTOMARY_SYSTEM
     head_a, head_b = await _setup_mock_heads(hass)
     await _set_temp(hass, SENSOR_A, 70)
     await _set_temp(hass, SENSOR_B, 70)
     zones = []
-    for name, head, sensor, opted in (
-        ("Primary", head_a, SENSOR_A, hands_off[0]),
-        ("Secondary", head_b, SENSOR_B, hands_off[1]),
+    for name, head, sensor, opted, safe in (
+        ("Primary", head_a, SENSOR_A, hands_off[0], safety[0]),
+        ("Secondary", head_b, SENSOR_B, hands_off[1], safety[1]),
     ):
         zone = {ZONE_NAME: name, ZONE_CLIMATE: head, ZONE_SENSOR: sensor}
         if opted or not legacy_key:
             zone[ZONE_HANDS_OFF] = opted
+        if safe:
+            zone[ZONE_SAFETY_PRIORITY_ENTITY] = safe
         zones.append(zone)
     data = {CONF_IDLE_ACTION: IDLE_ACTION_FAN_ONLY, CONF_ZONES: zones, **extra}
     if hysteresis is not None:
@@ -133,6 +152,25 @@ def _hvac_mode_calls(hass: HomeAssistant, head: str) -> list[str]:
             event.data["domain"] == "climate"
             and event.data["service"] == "set_hvac_mode"
             and data.get("entity_id") == head
+        ):
+            calls.append(data["hvac_mode"])
+
+    hass.bus.async_listen("call_service", _record)
+    return calls
+
+
+def _mode_commands(hass: HomeAssistant, head: str) -> list[str]:
+    """Record every mode sent to ``head`` from here on: set_hvac_mode, and
+    set_temperature's hvac_mode (how heat and cool are sent)."""
+    calls: list[str] = []
+
+    @callback
+    def _record(event) -> None:
+        data = event.data["service_data"]
+        if event.data["domain"] != "climate" or data.get("entity_id") != head:
+            return
+        if event.data["service"] == "set_hvac_mode" or (
+            event.data["service"] == "set_temperature" and "hvac_mode" in data
         ):
             calls.append(data["hvac_mode"])
 
@@ -597,6 +635,67 @@ async def test_opposite_mode_head_is_a_visible_standoff(hass: HomeAssistant) -> 
     assert plan.attributes["zones"][1]["hands_off_vote"] == "heat"
 
 
+async def test_safety_priority_vote_preempts_an_enabled_demand(hass: HomeAssistant) -> None:
+    """A hands-off room's safety-asserting vote outranks an enabled room's
+    ordinary demand -- the real scenario the safety tier exists for: a
+    released head in genuine distress must be able to get the compressor
+    into its needed mode even though a sibling merely wants comfort in the
+    opposite direction and would otherwise outrank it by configured order.
+
+    Also covers the required dwell-stamp fix: parking an ACTIVELY RUNNING
+    demand is a real compressor reversal and stamps like any other, so a
+    safety sensor that flaps can't reverse the compressor twice inside one
+    hysteresis window -- confirmed by checking the reversal back is itself
+    held by the dwell, not by poking internal state, but by the attribute
+    the UI/REST API would show."""
+    entry, head_a, head_b = await _setup(
+        hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
+        hysteresis=None,
+    )
+    await _set_temp(hass, SENSOR_A, 76)  # primary's ordinary demand: cool
+    await _recompute(hass, entry)  # the disabled secondary's park lands here
+    await _remote(hass, head_b, "heat")  # secondary's own remote: heat
+    for _ in range(2):
+        await _recompute(hass, entry)
+    # Baseline, no safety assertion: primary's demand wins (today's rule,
+    # unaffected by this patch when nothing claims safety).
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a)) == ("cool", "cool")
+
+    safety_entity = "binary_sensor.secondary_safety"
+    hass.states.async_set(safety_entity, "on")
+    manager = hass.config_entries.options
+    result = await open_options_page(hass, entry, "room_2")
+    result = await submit(
+        manager, result, {**prefilled(result), "safety_priority_entity": safety_entity},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()  # the option change reloads the entry
+    entry.runtime_data._last_mode_change_ts = 0.0  # hysteresis long elapsed
+    await _recompute(hass, entry)
+
+    plan = _plan(hass, entry)
+    assert plan.state == "heat"  # secondary's safety vote now wins
+    assert plan.attributes["standoff"] is True  # primary still wants cool
+    assert plan.attributes["zones"][1]["hands_off_vote"] == "heat"
+    assert plan.attributes["zones"][1]["safety_priority"] is True
+    assert plan.attributes["mode_by_safety"] is True
+    assert _s(hass, head_a) != "cool"  # primary's denied demand is not commanded
+    # It parked an ACTIVELY RUNNING demand: this stamps the dwell (NOT
+    # exempt), unlike a vote settling into otherwise-idle silence. (The gate
+    # that just PERMITTED this flip reads True on this same tick by
+    # construction; the stamp's effect shows up starting next tick.)
+    assert plan.attributes["mode_by_hands_off"] is False
+
+    # Prove the stamp actually protects the compressor: the safety condition
+    # clearing immediately afterward must NOT reverse it back right away.
+    hass.states.async_set(safety_entity, "off")
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert plan.state == "heat"  # held by the dwell this reversal just started
+    assert plan.attributes["mode_change_allowed"] is False
+
+
 async def test_disabled_primary_never_idles_an_enabled_room(hass: HomeAssistant) -> None:
     """Probes pr28b2 and #27: a hands-off PRIMARY in heat vs an enabled hot secondary."""
     entry, head_a, head_b = await _setup(
@@ -918,15 +1017,342 @@ async def test_no_vote_before_the_park_lands(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Safety priority: a room's sensor lifts the want it already has
+# ---------------------------------------------------------------------------
+async def _safety_setup(hass: HomeAssistant, **extra) -> tuple[MockConfigEntry, str, str]:
+    """Enabled primary; hands-off secondary whose stored config names SAFETY_B
+    as its Safety priority sensor; the default mode-change wait."""
+    return await _setup(
+        hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
+        hysteresis=None, safety=(None, SAFETY_B), **extra,
+    )
+
+
+async def _secondary_heating_vs_primary_calling_cool(
+    hass: HomeAssistant, entry: MockConfigEntry, head_b: str
+) -> None:
+    """The primary demands cool (76 F); a person runs the released secondary in heat."""
+    await _set_temp(hass, SENSOR_A, 76)
+    await _recompute(hass, entry)  # the disabled secondary's park lands here
+    await _remote(hass, head_b, "heat")
+    for _ in range(2):
+        await _recompute(hass, entry)
+
+
+async def _primary_coasting_in_band(
+    hass: HomeAssistant, entry: MockConfigEntry, head_a: str, head_b: str
+) -> None:
+    """As above, then the primary cools to 72 F (target 70): its demand is back
+    inside the band, but it is still engaged and its head still cools."""
+    await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
+    await _set_temp(hass, SENSOR_A, 72)
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a)) == ("cool", "cool")
+    assert plan.attributes["primary_demand"] == "neutral"
+    assert plan.attributes["primary_engage"] == "cool"
+
+
+def _reversals(states: list[str], start: str = "cool") -> int:
+    return sum(1 for a, b in zip([start, *states], states) if a != b)
+
+
+def _tracked(hass: HomeAssistant, entity_id: str) -> int:
+    """How many state-change jobs HA holds for ``entity_id`` (HA drops its
+    bookkeeping once nothing is tracked, e.g. after the entry unloads)."""
+    data = hass.data.get("track_state_change_data")
+    return 0 if data is None else len(data.callbacks.get(entity_id, ()))
+
+
+async def test_safety_vote_over_an_engaged_run_parks_it_and_stamps_the_dwell(
+    hass: HomeAssistant,
+) -> None:
+    """The primary is mid-run with its demand back inside the band. The
+    secondary's safety vote takes the mode, which parks the primary's running
+    head: a reversal the coordinator causes, so it starts the mode-change wait
+    exactly as it does over a room that is still demanding."""
+    entry, head_a, head_b = await _safety_setup(hass)
+    coord = entry.runtime_data
+    await _primary_coasting_in_band(hass, entry, head_a, head_b)
+    coord._last_mode_change_ts = 0.0  # the last flip's wait has long run out
+    sent = _mode_commands(hass, head_a)
+    hass.states.async_set(SAFETY_B, "on")
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert plan.state == "heat"
+    assert plan.attributes["mode_by_safety"] is True
+    assert plan.attributes["mode_by_hands_off"] is False  # a flip of ours
+    assert (_s(hass, head_a), sent) == ("fan_only", ["fan_only"])  # the run is parked
+    assert coord._last_mode_change_ts > 0.0  # ...and the park starts the wait
+    assert coord._mode_by_votes is False
+
+
+@pytest.mark.parametrize("resting", [None, MODE_COOL], ids=["last_used", "rest_cool"])
+async def test_flapping_safety_sensor_vs_an_engaged_run_reverses_once_per_wait(
+    hass: HomeAssistant, resting: str | None,
+) -> None:
+    """The safety sensor toggles on/off/on/off against the primary's engaged,
+    coasting cool run, and the parked primary warms back out of the band and
+    calls cool, all inside one mode-change wait: one compressor reversal, one
+    park, no re-stamp. When the wait runs out the primary's run resumes."""
+    extra = {} if resting is None else {CONF_RESTING_MODE_BIAS: resting}
+    entry, head_a, head_b = await _safety_setup(hass, **extra)
+    coord = entry.runtime_data
+    await _primary_coasting_in_band(hass, entry, head_a, head_b)
+    coord._last_mode_change_ts = 0.0
+    sent = _mode_commands(hass, head_a)
+    seen: list[str] = []
+
+    async def step() -> None:
+        await _recompute(hass, entry)
+        seen.append(_plan(hass, entry).state)
+
+    hass.states.async_set(SAFETY_B, "on")
+    await step()
+    stamp = coord._last_mode_change_ts
+    assert stamp > 0.0  # the park started the wait
+    hass.states.async_set(SAFETY_B, "off")
+    await step()
+    await _set_temp(hass, SENSOR_A, 74)  # the parked room calls cool again
+    await step()
+    hass.states.async_set(SAFETY_B, "on")
+    await step()
+    hass.states.async_set(SAFETY_B, "off")
+    await step()
+    assert seen == ["heat"] * 5
+    assert _reversals(seen) == 1
+    assert coord._last_mode_change_ts == stamp  # nothing re-stamped inside the wait
+    assert sent == ["fan_only"]
+    assert _plan(hass, entry).attributes["mode_change_allowed"] is False
+
+    coord._last_mode_change_ts = 0.0  # the wait runs out, the sensor still off
+    await _recompute(hass, entry)
+    assert (_plan(hass, entry).state, _s(hass, head_a)) == ("cool", "cool")
+    assert sent == ["fan_only", "cool"]
+
+
+async def test_flapping_safety_sensor_vs_a_calling_room_reverses_once_per_wait(
+    hass: HomeAssistant,
+) -> None:
+    """Control for the engaged case: the primary demands cool throughout."""
+    entry, head_a, head_b = await _safety_setup(hass, **{CONF_RESTING_MODE_BIAS: MODE_COOL})
+    coord = entry.runtime_data
+    await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
+    coord._last_mode_change_ts = 0.0
+    sent = _mode_commands(hass, head_a)
+    seen = []
+    for toggle in ("on", "off", "on", "off"):
+        hass.states.async_set(SAFETY_B, toggle)
+        await _recompute(hass, entry)
+        seen.append(_plan(hass, entry).state)
+    assert (seen, _reversals(seen), sent) == (["heat"] * 4, 1, ["fan_only"])
+
+
+@pytest.mark.parametrize(
+    ("engaged", "resting"), [(False, None), (True, MODE_COOL)], ids=["calling", "engaged"]
+)
+async def test_a_dwelled_safety_clear_arms_the_wakeup(
+    hass: HomeAssistant, engaged: bool, resting: str | None
+) -> None:
+    """The sensor clearing inside the wait the safety flip started is held, and
+    the dwell wakeup is armed so the mode returns when the wait runs out.
+
+    The engaged case needs a resting bias to have anywhere to return to: an
+    engaged run inside its band demands nothing, so under Last used the mode
+    stays until that room calls again (the flap test above covers that)."""
+    extra = {} if resting is None else {CONF_RESTING_MODE_BIAS: resting}
+    entry, head_a, head_b = await _safety_setup(hass, **extra)
+    coord = entry.runtime_data
+    if engaged:
+        await _primary_coasting_in_band(hass, entry, head_a, head_b)
+    else:
+        await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
+    coord._last_mode_change_ts = 0.0
+    hass.states.async_set(SAFETY_B, "on")
+    await _recompute(hass, entry)
+    assert _plan(hass, entry).state == "heat"
+    assert coord._last_mode_change_ts > 0.0
+    hass.states.async_set(SAFETY_B, "off")
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, plan.attributes["mode_change_allowed"]) == ("heat", False)
+    assert coord._dwell_timer is not None
+    coord._last_mode_change_ts = 0.0  # the wait runs out
+    await _recompute(hass, entry)
+    assert (_plan(hass, entry).state, _s(hass, head_a)) == ("cool", "cool")
+
+
+@pytest.mark.parametrize("sensor_state", ["off", "unavailable", "unknown", "On", "true", None])
+async def test_only_an_on_safety_sensor_claims_priority(
+    hass: HomeAssistant, sensor_state: str | None
+) -> None:
+    """Off, unavailable, unknown, any other spelling, or no entity at all is no
+    claim: the enabled primary keeps the mode. The same sensor turning on then
+    does take it, so the wiring under test is live."""
+    entry, head_a, head_b = await _safety_setup(hass)
+    coord = entry.runtime_data
+    if sensor_state is not None:
+        hass.states.async_set(SAFETY_B, sensor_state)
+    await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
+    coord._last_mode_change_ts = 0.0
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a)) == ("cool", "cool")
+    assert plan.attributes["zones"][1]["safety_priority"] is False
+    assert plan.attributes["mode_by_safety"] is False
+    hass.states.async_set(SAFETY_B, "on")
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, plan.attributes["zones"][1]["safety_priority"]) == ("heat", True)
+
+
+async def test_safety_sensor_creates_no_want(hass: HomeAssistant) -> None:
+    """A room with no heat or cool call of its own (disabled and held off, or
+    enabled and coasting to target inside its band) gains nothing from its
+    sensor being on; only its call is raised."""
+    entry, head_a, head_b = await _setup(
+        hass, enable=("_primary_enable", "_coordinator_enable"), hysteresis=None,
+        safety=(None, SAFETY_B),
+    )
+    coord = entry.runtime_data
+    hass.states.async_set(SAFETY_B, "on")
+    await _set_temp(hass, SENSOR_A, 76)
+    await _set_temp(hass, SENSOR_B, 60)  # the held-off secondary is cold
+    coord._last_mode_change_ts = 0.0
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a), _s(hass, head_b)) == ("cool", "cool", "off")
+    assert plan.attributes["zones"][1]["safety_priority"] is True
+    assert plan.attributes["mode_by_safety"] is False
+    # Enabled now, the secondary calls heat, and its sensor wins at once.
+    await _switch(hass, _eid(hass, entry, "_secondary_enable"), True)
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.state, _s(hass, head_a), _s(hass, head_b)) == ("heat", "fan_only", "heat")
+    assert plan.attributes["mode_by_safety"] is True
+    # Back inside its band it still runs to target, but calls nothing: the
+    # primary's call takes the mode once the wait has run out.
+    await _set_temp(hass, SENSOR_B, 68)
+    coord._last_mode_change_ts = 0.0
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert (plan.attributes["secondary_demand"], plan.attributes["secondary_engage"]) == (
+        "neutral", "heat",
+    )
+    assert (plan.state, _s(hass, head_a)) == ("cool", "cool")
+    assert plan.attributes["mode_by_safety"] is False
+
+
+async def test_standby_hold_silences_a_safety_vote(hass: HomeAssistant) -> None:
+    """The hold outranks the safety tier: the released head is held off and
+    casts no vote while the hold lasts."""
+    hass.states.async_set(INHIBIT, "off")
+    entry, _a, head_b = await _safety_setup(
+        hass, **{CONF_INHIBIT_ENTITY: INHIBIT, CONF_INHIBIT_ACTION: INHIBIT_ACTION_OFF},
+    )
+    await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
+    hass.states.async_set(SAFETY_B, "on")
+    entry.runtime_data._last_mode_change_ts = 0.0
+    await _recompute(hass, entry)
+    assert _plan(hass, entry).state == "heat"
+    hass.states.async_set(INHIBIT, "on")
+    await hass.async_block_till_done()
+    await _recompute(hass, entry)
+    plan = _plan(hass, entry)
+    assert plan.attributes["inhibited"] is True
+    assert plan.attributes["zones"][1]["hands_off_vote"] is None
+    assert plan.attributes["mode_by_safety"] is False
+    assert _s(hass, head_b) == "off"
+
+
+async def test_safety_sensor_is_tracked_only_when_configured(hass: HomeAssistant) -> None:
+    await _setup(hass, hands_off=(False, True))
+    assert _tracked(hass, SENSOR_A) >= 1  # the room sensors are; the helper sees them
+    assert _tracked(hass, SAFETY_B) == 0
+
+
+async def test_safety_sensor_alone_moves_the_plan_until_unload(hass: HomeAssistant) -> None:
+    """The sensor's own change refreshes the plan (no _recompute here), and
+    unloading the entry drops the subscription."""
+    entry, _a, head_b = await _safety_setup(hass)
+    assert _tracked(hass, SAFETY_B) == 1
+    await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
+    entry.runtime_data._last_mode_change_ts = 0.0
+    hass.states.async_set(SAFETY_B, "on")
+    for _ in range(3):
+        await hass.async_block_till_done()
+    assert _plan(hass, entry).state == "heat"
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert _tracked(hass, SAFETY_B) == 0
+
+
+async def test_options_reload_subscribes_and_drops_the_safety_sensor(
+    hass: HomeAssistant,
+) -> None:
+    """Set through Configure > Rooms: the reloaded coordinator follows the
+    sensor. Cleared: the subscription and the stored key are gone."""
+    entry, _a, head_b = await _setup(
+        hass, hands_off=(False, True), enable=("_primary_enable", "_coordinator_enable"),
+        hysteresis=None,
+    )
+    assert _tracked(hass, SAFETY_B) == 0
+    manager = hass.config_entries.options
+    result = await open_options_page(hass, entry, "room_2")
+    result = await submit(manager, result, {**prefilled(result), "safety_priority_entity": SAFETY_B})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert _tracked(hass, SAFETY_B) == 1
+    await _secondary_heating_vs_primary_calling_cool(hass, entry, head_b)
+    entry.runtime_data._last_mode_change_ts = 0.0
+    hass.states.async_set(SAFETY_B, "on")
+    for _ in range(3):
+        await hass.async_block_till_done()
+    assert _plan(hass, entry).state == "heat"
+
+    result = await open_options_page(hass, entry, "room_2")
+    values = {**prefilled(result)}
+    values.pop("safety_priority_entity")  # the user cleared the selector
+    result = await submit(manager, result, values)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert _tracked(hass, SAFETY_B) == 0
+    assert [z.safety_priority_entity for z in entry.runtime_data.zones] == [None, None]
+    assert ZONE_SAFETY_PRIORITY_ENTITY not in entry.data[CONF_ZONES][1]
+
+
+# ---------------------------------------------------------------------------
 # The ranking itself, pure
 # ---------------------------------------------------------------------------
+def _arb_demands(demands, votes, safety=None):
+    """Build the (demand, vote) Demand pairs _zone_arbitration_pair would, for
+    a test that wants to call :func:`arbitrate` directly without a Zone."""
+    safety = safety or [False] * len(demands)
+    pairs = []
+    for i, (demand, vote, is_safety) in enumerate(zip(demands, votes, safety)):
+        tier = PRIORITY_SAFETY if is_safety else None
+        pairs.append(Demand(
+            direction=demand if demand in ("cool", "heat") else None,
+            priority=(tier if tier is not None else PRIORITY_DEMAND, i),
+        ))
+        pairs.append(Demand(
+            direction=vote,
+            priority=(tier if tier is not None else PRIORITY_VOTE, i),
+            read_only=True,
+        ))
+    return pairs
+
+
 def test_vote_ranking_pure() -> None:
-    """Votes only fill silence; an enabled demand or run always decides."""
-    def decide(demands, engages, votes, current="cool", allowed=True):
-        return shared_mode_with_votes(
-            demands=demands, engages=engages, votes=votes,
-            current=current, allowed=allowed,
+    """Votes only fill silence; an enabled demand or run always decides --
+    UNLESS a safety priority is asserted, which outranks either kind."""
+    def decide(demands, engages, votes, current="cool", allowed=True, safety=None):
+        engaged = any(e in ("cool", "heat") for e in engages)
+        grant = arbitrate(
+            _arb_demands(demands, votes, safety),
+            engaged=engaged, current=current, allowed=allowed,
         )
+        return (grant.direction, grant.read_only)
 
     # Silence: the vote decides, and says so (no dwell stamp).
     assert decide(["neutral", "off"], ["satisfied", "off"], [None, "heat"]) == ("heat", True)
@@ -941,6 +1367,111 @@ def test_vote_ranking_pure() -> None:
     # Non-heat/cool observations are no vote at all.
     for junk in ("fan_only", "dry", "auto", "heat_cool", "off", "unavailable", None):
         assert decide(["neutral", "off"], ["satisfied", "off"], [None, junk]) == ("cool", False)
+    # A safety-asserting VOTE preempts an ordinary DEMAND -- the gap that
+    # motivated generalizing priority instead of hardcoding "demand beats
+    # vote": zone 1 is hands-off and in safety distress (wants heat); zone 0
+    # is merely comfort-calling cool. The safety vote wins despite being a
+    # vote -- and reads back NOT read_only, since it's parking zone 0's
+    # actively running demand: a real compressor reversal, stamped like any
+    # other, so a flapping safety sensor can't reverse it twice inside one
+    # hysteresis window.
+    assert decide(
+        ["cool", "off"], ["cool", "off"], [None, "heat"], safety=[False, True],
+    ) == ("heat", False)
+    # A safety-asserting DEMAND preempts an ordinary vote, and is NOT
+    # read_only (it's a coordinated room's own demand, commands hardware).
+    assert decide(
+        ["heat", "off"], ["heat", "off"], ["cool", None], current="cool", safety=[True, False],
+    ) == ("heat", False)
+    # A safety vote deciding in silence (nothing commanding is running) is
+    # still exempt -- only OVERRIDING an active commanding demand stamps.
+    assert decide(
+        ["neutral", "off"], ["satisfied", "off"], [None, "heat"], safety=[False, True],
+    ) == ("heat", True)
+    # An engaged run coasting inside its band is just as active: its demand
+    # is neutral, but its head is running and the safety vote parks it, so
+    # that is a stamped reversal too, not an exempt one.
+    assert decide(
+        ["neutral", "off"], ["cool", "off"], [None, "heat"], safety=[False, True],
+    ) == ("heat", False)
+    # The wait still holds a safety vote back, and once the vote holds the
+    # mode there is nothing left to exempt.
+    assert decide(
+        ["cool", "off"], ["cool", "off"], [None, "heat"], allowed=False, safety=[False, True],
+    ) == ("cool", False)
+    assert decide(
+        ["cool", "off"], ["cool", "off"], [None, "heat"], current="heat", safety=[False, True],
+    ) == ("heat", False)
+
+
+def test_by_safety_means_an_asserting_want_is_the_mode() -> None:
+    """``by_safety`` (the plan's ``mode_by_safety``) is True while a safety
+    room's want is the answer, even when order alone gives the same answer,
+    and False when the wait holds the mode against that want."""
+    def by_safety(demands, votes, current, allowed, safety):
+        grant = arbitrate(
+            _arb_demands(demands, votes, safety),
+            engaged=any(d in ("cool", "heat") for d in demands),
+            current=current, allowed=allowed,
+        )
+        return (grant.direction, grant.by_safety)
+
+    # Both rooms want heat; the second happens to be marked safety.
+    assert by_safety(["heat", "heat"], [None, None], "cool", True, [False, True]) == ("heat", True)
+    assert by_safety(["heat", "heat"], [None, None], "cool", True, None) == ("heat", False)
+    # The wait holds cool against the safety vote for heat.
+    assert by_safety(["cool", "off"], [None, "heat"], "cool", False, [False, True]) == (
+        "cool", False,
+    )
+
+
+def _shared_mode_with_votes_3_6_0(
+    *,
+    demands: list[str],
+    engages: list[str],
+    votes: list[str | None],
+    current: str,
+    allowed: bool,
+    resting: str | None = None,
+) -> tuple[str, bool]:
+    """3.6.0's ``logic.shared_mode_with_votes``, copied verbatim as the oracle."""
+    plain = shared_mode(
+        demands=demands, current=current, allowed=allowed, resting=resting
+    )
+    calls = (MODE_COOL, MODE_HEAT)
+    cast = [vote for vote in votes if vote in calls]
+    if not cast or any(call in calls for call in (*demands, *engages)):
+        return (plain, False)
+    voted = shared_mode(demands=cast, current=current, allowed=allowed, resting=resting)
+    return (voted, voted != plain)
+
+
+def test_without_a_safety_sensor_arbitration_is_3_6_0() -> None:
+    """Every two-room input, junk votes included: with no room marked safety,
+    arbitrate() gives 3.6.0's mode and stamp decision, and never by_safety."""
+    cases = 0
+    for demands, engages, votes, current, allowed, resting in itertools.product(
+        itertools.product(("cool", "heat", "neutral", "off"), repeat=2),
+        itertools.product(("cool", "heat", "satisfied", "off"), repeat=2),
+        itertools.product(("cool", "heat", None, "fan_only"), repeat=2),
+        ("cool", "heat"),
+        (True, False),
+        (None, "cool", "heat"),
+    ):
+        old = _shared_mode_with_votes_3_6_0(
+            demands=list(demands), engages=list(engages), votes=list(votes),
+            current=current, allowed=allowed, resting=resting,
+        )
+        grant = arbitrate(
+            _arb_demands(demands, votes),
+            engaged=any(e in ("cool", "heat") for e in engages),
+            current=current, allowed=allowed, resting=resting,
+        )
+        assert (grant.direction, grant.read_only, grant.by_safety) == (*old, False), (
+            demands, engages, votes, current, allowed, resting,
+        )
+        cases += 1
+    assert cases == 4**6 * 2 * 2 * 3
 
 
 # ---------------------------------------------------------------------------

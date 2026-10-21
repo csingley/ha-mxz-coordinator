@@ -76,6 +76,12 @@ ZONE_EVIDENCE_BASIS = "evidence_basis"
 # leaves that head alone until the room is enabled again (someone can run it
 # from its own remote), and its observed heat/cool is a low-priority vote.
 ZONE_HANDS_OFF = "hands_off"
+# Optional per-zone binary_sensor: "this zone is asserting a safety override
+# right now" (e.g. a freeze/overheat floor). Unset = this zone's Demand never
+# carries PRIORITY_SAFETY. Settable on any zone regardless of enable/hands_off
+# -- a coordinated room's own demand or a hands-off room's vote can both be
+# marked safety; see logic.arbitrate().
+ZONE_SAFETY_PRIORITY_ENTITY = "safety_priority_entity"
 ZONE_SAMPLE_TIMESTAMP_ATTR = "sample_timestamp_attribute"
 ZONE_SAMPLE_SEQUENCE_ATTR = "sample_sequence_attribute"
 EVIDENCE_UNKNOWN = "unknown"

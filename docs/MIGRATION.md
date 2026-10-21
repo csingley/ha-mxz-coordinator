@@ -1,5 +1,32 @@
 # Upgrading and migrating MXZ Coordinator
 
+## Safety priority (3.7.0)
+
+A per-room setting, **Safety priority**, in Configure → Rooms → (room): an optional
+`binary_sensor` reference. Stored as `safety_priority_entity` in that room's record in
+the entry's `zones` list, only when set; clearing it removes the key.
+
+**Existing entries are unchanged.** No config-entry version change, no migration: a
+room with no `safety_priority_entity` key never carries priority override, which is
+every room of every entry saved before this setting existed.
+
+While the referenced sensor reads exactly `on`, that room's want for heat or cool
+outranks every other room's, enabled or run from its own remote, including an enabled
+room that is calling or still running to its target, which an ordinary vote from a
+room run on its own remote never overrides. Taking the direction from such a room
+parks its head, so it starts the compressor's mode-change wait exactly like any other
+reversal; deciding while no enabled room is calling or still running does not, the
+same as an ordinary vote. The sensor only raises a want the room already has; it never
+starts heat or cool by itself. `off`, `unavailable`, `unknown` or a missing entity is no
+priority.
+
+The plan sensor gains a top-level `mode_by_safety` attribute, and each room in its
+`zones` list gains `safety_priority` (`true`/`false`). `mode_by_safety` is true while a
+room marked Safety priority is asserting and its want is the shared mode. On an
+install with no room's safety priority wired it is always false.
+
+See [Safety priority](../README.md#safety-priority).
+
 ## Run one room from its own remote (3.6.0)
 
 A per-room setting, **Let its own remote run it while disabled**, in Configure →
