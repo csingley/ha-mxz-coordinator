@@ -19,6 +19,7 @@ from .const import (
     ENGAGE_SATISFIED,
     EVIDENCE_HA_WRITE,
     EVIDENCE_SAMPLE_TIMESTAMP,
+    FLOOR_REARM_SECONDS,
     HEALTH_AWAITING,
     HEALTH_CADENCE_UNKNOWN,
     HEALTH_HEALTHY,
@@ -516,9 +517,11 @@ class FloorRun:
     ``mark`` is the best reading credited this run (highest for heat, lowest
     for cool), moved only by a whole ``step``; ``driven`` is how many seconds
     MXZ has driven the head in the floor's direction since the mark last
-    moved; ``worst`` is the worst reading (lowest for heat) since the mark last
-    moved, frozen once the run stalls, so only a genuinely new low since the
-    stall began re-arms it.
+    moved; ``worst`` is the worst reading (lowest for heat) in the last
+    ``FLOOR_REARM_SECONDS`` of that driving, frozen once the run stalls, so
+    only a genuinely new low past it re-arms the run. ``recent`` holds the
+    readings that window needs, as (``driven`` when read, reading), oldest
+    first: only those that are still in it and worse than every later one.
     """
 
     direction: str
@@ -526,6 +529,7 @@ class FloorRun:
     worst: float
     driven: float = 0.0
     stalled: bool = False
+    recent: tuple[tuple[float, float], ...] = ()
 
 
 def floor_progress(
@@ -537,13 +541,15 @@ def floor_progress(
     direction since the last reading (0 while it waited). A reading one
     ``step`` past the mark moves the mark there and restarts the clock; a
     clock that reaches ``cap`` stalls the run. A stalled run re-arms (as a
-    new run) only on a reading one step past its worst one since the mark
-    last moved (decision 11: "below the lowest reading since the stall");
+    new run) only on a reading one step past its worst one in the last
+    ``FLOOR_REARM_SECONDS`` of driving before the stall (decision 11, P9);
     reaching the clear line is the caller's other way out
-    (:func:`floor_call`). ``worst`` restarts at each gain and is frozen while
-    stalled, so a room that keeps cooling in sub-step increments re-arms
-    once it is one step below it. A sensor flickering between two adjacent
-    values does neither: its low is already the window's worst.
+    (:func:`floor_call`). The window is on the run's own clock (driven
+    time), so a dip an hour of driving or more before the stall no longer
+    counts. ``worst`` restarts at each gain and is frozen while stalled, so
+    a room that keeps cooling in sub-step increments re-arms once it is one
+    step below it. A sensor flickering between two adjacent values does
+    neither: its low is in the window, and is already the window's worst.
     """
     sign = 1.0 if run.direction == MODE_HEAT else -1.0
     if run.stalled:
@@ -551,11 +557,21 @@ def floor_progress(
             return FloorRun(direction=run.direction, mark=temp, worst=temp)
         return run
     gained = sign * (temp - run.mark) >= step - 1e-9
-    worst = run.worst if sign * (temp - run.worst) >= 0 else temp
     if gained:
-        return replace(run, mark=temp, worst=temp, driven=0.0)
+        return replace(run, mark=temp, worst=temp, driven=0.0, recent=())
     driven = run.driven + max(driven_for, 0.0)
-    return replace(run, worst=worst, driven=driven, stalled=driven >= cap)
+    # A reading leaves the window once older than its span, or once a later
+    # one is as bad or worse (it can no longer be the window's worst).
+    recent = (
+        *(
+            (at, seen) for at, seen in run.recent
+            if at >= driven - FLOOR_REARM_SECONDS and sign * (temp - seen) > 0
+        ),
+        (driven, temp),
+    )
+    return replace(
+        run, worst=recent[0][1], driven=driven, stalled=driven >= cap, recent=recent
+    )
 
 
 def setpoints(

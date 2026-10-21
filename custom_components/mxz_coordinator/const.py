@@ -96,6 +96,10 @@ FLOOR_RANGE_C = (2.0, 18.0, 24.0, 38.0)
 # The no-progress cap (decision 11): this long actually driving the head
 # without one step of new best reading ends the run as `blind`.
 FLOOR_STALL_SECONDS = 2 * 3600
+# A stalled run re-arms one step past its worst reading in this much of the
+# driving before the stall (P9), not since its last gain: a dip earlier in
+# the window cannot push the re-arm line far past the stall.
+FLOOR_REARM_SECONDS = 3600
 # A hands-off room that yielded a run to a person re-arms after this long
 # (or once the room reaches the clear line).
 FLOOR_YIELD_SECONDS = 4 * 3600

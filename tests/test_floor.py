@@ -1482,6 +1482,138 @@ async def test_d11_a_run_that_gained_then_stalled_rearms_one_step_past_the_stall
     assert (f.floor(1), _s(hass, f.b)) == ((mode, None), mode)
 
 
+P9_ROOMS = pytest.mark.parametrize(
+    ("metric", "trip", "gains", "dip", "back", "step_", "mode"),
+    [
+        (False, 40.0, (41.0, 42.0, 43.0, 44.0), 41.0, 43.5, 1.0, "heat"),
+        (False, 95.0, (94.0, 93.0, 92.0, 91.0), 94.0, 91.5, 1.0, "cool"),
+        (True, 5.0, (5.5, 6.0, 6.5, 7.0), 5.5, 6.8, 0.5, "heat"),
+        (True, 36.0, (35.5, 35.0, 34.5, 34.0), 35.5, 34.2, 0.5, "cool"),
+    ],
+    ids=["floor_f", "ceiling_f", "floor_c", "ceiling_c"],
+)
+
+
+async def _p9_heat_to_best(f: Floor, freezer, trip, gains, mode) -> None:
+    await f.temp(SENSOR_B, trip)
+    for value in gains:
+        await _tick(f.hass, freezer, timedelta(minutes=30))
+        await f.temp(SENSOR_B, value)
+        assert (f.floor(1), _s(f.hass, f.b)) == ((mode, None), mode), value
+
+
+def _past(value: float, toward: float, steps: float, step_: float) -> float:
+    """``steps`` steps from ``value`` against the run's direction."""
+    return round(value - toward * steps * step_, 2)
+
+
+@P9_ROOMS
+async def test_p9_a_dip_long_before_the_stall_does_not_move_the_rearm_line(
+    hass: HomeAssistant, freezer, metric, trip, gains, dip, back, step_, mode
+) -> None:
+    """P9, review 2's case through the integration: the guest room trips at
+    40 °F and MXZ heats it to 44; 10 minutes later a door opens (41), it is
+    back at 43.5 ten minutes after that and stalls there (blind, head off)
+    2 h after the gain. The dip was 1 h 50 min before the stall, so the
+    re-arm line is one step past 43.5: 43 stays blind, 42.5 runs the head
+    again. Mirrored for a ceiling and in °C."""
+    floors = ((None, None), (10.0, 32.0) if metric else (50.0, 90.0))
+    f = await _setup(hass, metric=metric, floors=floors)
+    toward = 1.0 if mode == "heat" else -1.0
+    await _p9_heat_to_best(f, freezer, trip, gains, mode)
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, dip)
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, back)
+    assert (f.floor(1)[0], _s(hass, f.b)) == (mode, mode)
+    await _tick(hass, freezer, timedelta(hours=1, minutes=40, seconds=5))
+    await f.compute()
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off")
+    assert f.coord._floor_runs["secondary"].worst == back
+    await f.temp(SENSOR_B, _past(back, toward, 0.5, step_))
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off")
+    await f.temp(SENSOR_B, _past(back, toward, 1, step_))
+    assert (f.floor(1), _s(hass, f.b)) == ((mode, None), mode)
+
+
+@P9_ROOMS
+async def test_p9_a_dip_in_the_last_hour_before_the_stall_still_counts(
+    hass: HomeAssistant, freezer, metric, trip, gains, dip, back, step_, mode
+) -> None:
+    """P9: the door opens 1 h 10 min after the gain, 50 minutes before the
+    stall. The dip is the window's worst, so one step past 43.5 and half a
+    step past the dip stay blind; one full step past the dip (40 °F) runs
+    the head again."""
+    floors = ((None, None), (10.0, 32.0) if metric else (50.0, 90.0))
+    f = await _setup(hass, metric=metric, floors=floors)
+    toward = 1.0 if mode == "heat" else -1.0
+    await _p9_heat_to_best(f, freezer, trip, gains, mode)
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, back)
+    await _tick(hass, freezer, timedelta(hours=1))
+    await f.temp(SENSOR_B, dip)
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, back)
+    await _tick(hass, freezer, timedelta(minutes=40, seconds=5))
+    await f.compute()
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off")
+    assert f.coord._floor_runs["secondary"].worst == dip
+    for value in (_past(back, toward, 1, step_), _past(dip, toward, 0.5, step_)):
+        await f.temp(SENSOR_B, value)
+        assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off"), value
+    await f.temp(SENSOR_B, _past(dip, toward, 1, step_))
+    assert (f.floor(1), _s(hass, f.b)) == ((mode, None), mode)
+
+
+@pytest.mark.parametrize("record", ["this_build", "before_p9", "unreadable_window"])
+async def test_p9_the_rearm_window_across_a_restart(
+    hass: HomeAssistant, freezer, record: str
+) -> None:
+    """P9, restart continuity: the door opened (41 °F) 10 minutes before
+    Home Assistant stopped, an hour of driving after the run's last gain.
+    The window is kept in the run's restore data, so the run that stalls
+    after the restart still re-arms only one step past the dip (40). A
+    record from before P9 has no window: it is still restored, and its
+    window starts again from the first reading after the restart (43.5),
+    so that run re-arms one step past 43.5 (42.5). So does a record whose
+    window cannot be read."""
+    f = await _setup(hass)
+    await _p9_heat_to_best(f, freezer, 40.0, (41.0, 42.0, 43.0, 44.0), "heat")
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, 43.5)
+    await _tick(hass, freezer, timedelta(hours=1))
+    await f.temp(SENSOR_B, 41.0)
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, 43.5)
+    await _shutdown(hass, f.entry)
+    restore = rs.async_get(hass)
+    sid = _eid(hass, f.entry, "_secondary_enable")
+    stored = restore.last_states[sid]
+    data = stored.extra_data.as_dict()
+    assert [seen for _, seen in data["floor_run"]["window"]] == [41.0, 43.5]
+    if record != "this_build":
+        old_run = {k: v for k, v in data["floor_run"].items() if k != "window"}
+        if record == "unreadable_window":
+            old_run["window"] = [[3600.0, 41.0], [4200.0, "41"]]
+        restore.last_states[sid] = rs.StoredState(
+            stored.state, rs.RestoredExtraData({**data, "floor_run": old_run}),
+            stored.last_seen,
+        )
+    await _tick(hass, freezer, 3 * HOUR)  # downtime is not charged
+    await _startup(hass, f.entry)
+    await f.compute()
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("heat", "heat")
+    await _tick(hass, freezer, timedelta(minutes=40, seconds=5))
+    await f.compute()
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off")
+    worst = 41.0 if record == "this_build" else 43.5
+    assert f.coord._floor_runs["secondary"].worst == worst
+    await f.temp(SENSOR_B, worst - 0.5)
+    assert f.floor(1)[0] == "blind"
+    await f.temp(SENSOR_B, worst - 1)
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("heat", "heat")
+
+
 async def test_d11_a_standoff_loser_is_not_stalled_by_waiting(hass: HomeAssistant, freezer) -> None:
     """Decision 11: the clock runs only while MXZ drives the head. A ceiling
     that loses to a freeze floor for 3 h is still tripped (held), and runs

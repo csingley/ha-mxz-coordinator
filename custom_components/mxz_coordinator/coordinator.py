@@ -3874,6 +3874,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             record["floor_run"] = {
                 "direction": run.direction, "mark": run.mark, "worst": run.worst,
                 "driven": run.driven, "stalled": run.stalled,
+                "window": [[at, seen] for at, seen in run.recent],
             }
         if (prior := self._floor_prior.get(slug)) is not None:
             record["floor_prior"] = {"mode": prior[0], "low": prior[1], "high": prior[2]}
@@ -3887,7 +3888,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Only a well-formed record for a floor still configured is taken; any
         other is dropped, and the room's first compute decides afresh (a
         hands-off room then parks, since a run had un-released it). Downtime
-        is not charged to the no-progress clock.
+        is not charged to the no-progress clock. A run without a readable
+        ``window`` (as 3.7.0 betas before P9 stored it) restarts its re-arm
+        window from the next reading.
         """
         zone = next((z for z in self.zones if z.slug == slug), None)
         if zone is None:
@@ -3906,6 +3909,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._floor_runs[slug] = FloorRun(
                     direction=run["direction"], mark=mark, worst=worst,
                     driven=max(driven, 0.0), stalled=run["stalled"],
+                    recent=_floor_window(run.get("window")),
                 )
                 prior = data.get("floor_prior")
                 if isinstance(prior, dict) and prior.get("mode") == run["direction"]:
@@ -4117,6 +4121,19 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _floor_window(value: Any) -> tuple[tuple[float, float], ...]:
+    """A stored re-arm window: [[driven, reading], ...], else empty."""
+    if not isinstance(value, list):
+        return ()
+    pairs = [
+        (_finite(item[0]), _finite(item[1]))
+        for item in value if isinstance(item, list) and len(item) == 2
+    ]
+    if len(pairs) != len(value) or any(None in pair for pair in pairs):
+        return ()
+    return tuple(pairs)
 
 
 def _finite(value: Any) -> float | None:

@@ -199,6 +199,95 @@ def test_a_run_that_gained_then_stalled_rearms_one_step_past_the_stall_not_the_t
     assert step(run, rearm, 0, step_) == FloorRun(direction=direction, mark=rearm, worst=rearm)
 
 
+P9_CASES = pytest.mark.parametrize(
+    ("direction", "trip", "best", "dip", "back", "step_"),
+    [
+        ("heat", 40.0, 44.0, 41.0, 43.5, 1.0),
+        ("cool", 95.0, 91.0, 94.0, 91.5, 1.0),
+        ("heat", 5.0, 7.0, 5.5, 6.8, 0.5),
+        ("cool", 36.0, 34.0, 35.5, 34.2, 0.5),
+    ],
+    ids=["floor_f", "ceiling_f", "floor_c", "ceiling_c"],
+)
+
+
+def _gain_to_best(direction, trip, best, step_):
+    toward = 1.0 if direction == "heat" else -1.0
+    run, temp = run_for(direction, trip), trip
+    while temp != best:
+        temp = round(temp + toward * step_, 1)
+        run = step(run, temp, 600, step_)
+        assert (run.mark, run.driven) == (temp, 0.0)
+    return run, toward
+
+
+@P9_CASES
+def test_p9_a_dip_more_than_an_hour_of_driving_before_the_stall_does_not_count(
+    direction, trip, best, dip, back, step_
+) -> None:
+    """P9, review 2's case: trip 40 °F, heated to 44 a step at a time; a
+    door opens (41) half an hour of driving after the last gain, the room
+    comes back to 43.5 and stalls there 2 h after the gain. The dip was 1.5 h
+    of driving before the stall, outside the last hour, so the re-arm line is
+    one step past 43.5: 43 stays stalled, 42.5 re-arms (the old since-gain
+    rule waited for 40). Mirrored for a ceiling and in °C."""
+    run, toward = _gain_to_best(direction, trip, best, step_)
+    run = step(run, dip, 1800, step_)
+    run = step(run, back, 600, step_)
+    for _ in range(7):
+        run = step(run, back, 600, step_)
+    assert (run.stalled, run.driven) == (False, 6600)
+    run = step(run, back, 600, step_)
+    assert (run.stalled, run.worst) == (True, back)
+    half = round(back - toward * step_ / 2, 2)
+    assert step(run, half, 0, step_).stalled is True
+    rearm = round(back - toward * step_, 1)
+    assert step(run, rearm, 0, step_) == FloorRun(direction=direction, mark=rearm, worst=rearm)
+
+
+@P9_CASES
+def test_p9_a_dip_in_the_last_hour_of_driving_before_the_stall_still_counts(
+    direction, trip, best, dip, back, step_
+) -> None:
+    """P9: the same run, but the door opens 1 h 10 min of driving after the
+    gain, inside the last hour before the stall. The dip is the window's
+    worst: one step past the stall reading stays stalled, half a step past
+    the dip too, and one full step past the dip re-arms."""
+    run, toward = _gain_to_best(direction, trip, best, step_)
+    run = step(run, back, 600, step_)
+    for _ in range(5):
+        run = step(run, back, 600, step_)
+    run = step(run, dip, 600, step_)  # 70 min after the gain
+    run = step(run, back, 600, step_)
+    for _ in range(3):
+        run = step(run, back, 600, step_)
+    run = step(run, back, 600, step_)
+    assert (run.stalled, run.driven, run.worst) == (True, 7200, dip)
+    assert step(run, round(back - toward * step_, 1), 0, step_).stalled is True
+    assert step(run, round(dip - toward * step_ / 2, 2), 0, step_).stalled is True
+    rearm = round(dip - toward * step_, 1)
+    assert step(run, rearm, 0, step_) == FloorRun(direction=direction, mark=rearm, worst=rearm)
+
+
+def test_p9_the_window_is_the_last_hour_of_driving_to_the_second() -> None:
+    """P9 boundary: a dip exactly one hour of driving before the stall is in
+    the window; one second earlier it is not. Waiting (no driving) does not
+    move the window: a dip during a 3 h wait, an hour of driving before the
+    stall, still counts."""
+    def stall_after_dip_at(at: float, wait: float = 0.0) -> FloorRun:
+        run = step(run_for(temp=44.0), 43.5, at)
+        run = step(run, 41.0, 0)
+        for _ in range(int(wait // 600)):
+            run = step(run, 41.0, 0)
+        run = step(run, 43.5, 0)
+        return step(run, 43.5, 2 * HOUR - at)
+
+    assert stall_after_dip_at(HOUR).worst == 41.0
+    assert stall_after_dip_at(HOUR - 1).worst == 43.5
+    assert stall_after_dip_at(HOUR, wait=3 * HOUR).worst == 41.0
+    assert stall_after_dip_at(HOUR - 1, wait=3 * HOUR).worst == 43.5
+
+
 def test_ceiling_cap_mirrors_with_a_new_high() -> None:
     """Decision 11 (ceiling): progress is falling; a stalled ceiling re-arms
     only on a new high one step above its highest reading since the stall
