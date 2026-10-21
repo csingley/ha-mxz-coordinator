@@ -900,6 +900,341 @@ async def test_p10_a_single_setpoint_head_keeps_the_warmer_of_the_two(
 
 
 # ---------------------------------------------------------------------------
+# P15: a person's setpoint change during a run MXZ took over from them
+# ---------------------------------------------------------------------------
+async def _head_reports(hass: HomeAssistant, entity_id: str, **attrs: Any) -> None:
+    """The head reports a setting with no service call behind it: a person at
+    its own remote, or a late or echoed report of a command. ``attrs`` name
+    the entity's ``_attr_`` fields (target_temperature_low, hvac_mode, ...)."""
+    head = _head(hass, entity_id)
+    for key, value in attrs.items():
+        setattr(head, f"_attr_{key}", value)
+    head.async_write_ha_state()
+    await hass.async_block_till_done()
+
+
+async def _remote_sets(hass: HomeAssistant, entity_id: str, low: float, high: float | None = None) -> None:
+    """A person changes only the setpoint at the head's own remote: both
+    edges of a range head, or the one setpoint (``high`` None)."""
+    if high is None:
+        await _head_reports(hass, entity_id, target_temperature=low)
+    else:
+        await _head_reports(
+            hass, entity_id, target_temperature_low=low, target_temperature_high=high
+        )
+
+
+def _setpoint_commands(hass: HomeAssistant, entity_id: str) -> list[tuple]:
+    """Every set_temperature sent to the head from here on, as (mode, low,
+    high), or (mode, temperature) on a single-setpoint head. A person at the
+    remote sends none, so in these tests each one is MXZ's."""
+    calls: list[tuple] = []
+
+    @callback
+    def _record(event) -> None:
+        data = event.data["service_data"]
+        if (
+            event.data["domain"] != "climate" or event.data["service"] != "set_temperature"
+            or data.get("entity_id") != entity_id
+        ):
+            return
+        if "temperature" in data:
+            calls.append((data.get("hvac_mode"), data["temperature"]))
+        else:
+            calls.append((data.get("hvac_mode"), data["target_temp_low"], data["target_temp_high"]))
+
+    hass.bus.async_listen("call_service", _record)
+    return calls
+
+
+def _theirs(f: Floor) -> tuple[str, float, float] | None:
+    """The person's setting MXZ will give back at the end of the run."""
+    return f.coord._floor_prior.get("secondary")
+
+
+@pytest.mark.parametrize(
+    ("mode", "theirs", "new", "during", "mid", "clear"),
+    [
+        ("heat", (70, 72), (74, 76), (74, 76), 48, 53),
+        ("heat", (56, 58), (74, 76), (74, 76), 48, 53),
+        ("heat", (70, 72), (56, 58), (59, 61), 48, 53),
+        ("heat", (56, 58), (54, 56), (59, 61), 48, 53),
+        ("heat", (70, 72), (58, 64), (59, 64), 48, 53),
+        ("cool", (88, 90), (66, 68), (66, 68), 89, 87),
+        ("cool", (66, 68), (88, 90), (85, 87), 89, 87),
+    ],
+    ids=["floor_raised_above_the_line", "floor_raised_from_below_the_line",
+         "floor_lowered_below_the_line", "floor_lowered_further_below",
+         "floor_edges_split", "ceiling_lowered_below_the_line",
+         "ceiling_raised_above_the_line"],
+)
+async def test_p15_a_persons_change_during_the_run_is_kept_where_it_protects_and_given_back(
+    hass: HomeAssistant, mode, theirs, new, during, mid, clear
+) -> None:
+    """P15: MXZ took the hands-off head over from a person running it in the
+    floor's direction (P3), and during the run they change only the setpoint
+    at the remote. That is their setting now: MXZ runs the head at the higher
+    of it and the clear line's 59/61, edge by edge (P10), and gives it back at
+    clear. So a raise to 74/76 sticks and nothing is written over it, while a
+    drop to 56/58 is held at 59/61 for the run and 56/58 is what comes back.
+    Mirror for a ceiling over their cool (85/87): a lower cool sticks, a
+    higher one is held at 85/87 and given back. The exact set_temperature
+    commands MXZ sends from the change on are the oracle."""
+    f = await _setup(hass, hands_off=(False, True))
+    await _persons_heat_then_trip(f, mode, *theirs)
+    sent = _setpoint_commands(hass, f.b)
+    await _remote_sets(hass, f.b, *new)
+    await f.compute()
+    assert (_theirs(f), _run(hass, f.b), f.zone(1)["hands_off"]) == (
+        (mode, *new), (mode, *during), "floor",
+    )
+    await f.temp(SENSOR_B, mid)
+    assert (f.floor(1)[0], _run(hass, f.b)) == (mode, (mode, *during))
+    await f.temp(SENSOR_B, clear)
+    assert (_run(hass, f.b), f.zone(1)["hands_off"], f.floor(1)[0]) == (
+        (mode, *new), "released", "armed",
+    )
+    assert sent == ([] if during == new else [(mode, *during), (mode, *new)])
+
+
+@pytest.mark.parametrize(
+    ("mode", "theirs", "new", "during", "trip", "clear"),
+    [
+        ("heat", 68, 72, 72, 45, 53),
+        ("heat", 68, 55, 59, 45, 53),
+        ("cool", 70, 66, 66, 92, 87),
+        ("cool", 70, 89, 87, 92, 87),
+    ],
+    ids=["heat_raised", "heat_lowered", "cool_lowered", "cool_raised"],
+)
+async def test_p15_a_single_setpoint_head_follows_the_persons_change(
+    hass: HomeAssistant, mode, theirs, new, during, trip, clear
+) -> None:
+    """P15 on a single-setpoint head: its one setpoint is the person's
+    setting. A warmer one (a cooler one, under a ceiling) sticks; the other
+    way the clear line's (59 °F heating, 87 °F cooling) holds for the run;
+    either way their latest comes back at clear."""
+    f = await _setup(hass, hands_off=(False, True))
+    _single_setpoint(hass, f.b)
+    await f.compute()
+    await hass.services.async_call(
+        "climate", "set_temperature",
+        {"entity_id": f.b, "hvac_mode": mode, "temperature": theirs}, blocking=True,
+    )
+    await hass.async_block_till_done()
+    await f.compute()
+    await f.temp(SENSOR_B, trip)
+    assert (_s(hass, f.b), hass.states.get(f.b).attributes["temperature"]) == (mode, theirs)
+    sent = _setpoint_commands(hass, f.b)
+    await _remote_sets(hass, f.b, new)
+    await f.compute()
+    st = hass.states.get(f.b)
+    assert (_theirs(f), st.state, st.attributes["temperature"]) == ((mode, new, new), mode, during)
+    await f.temp(SENSOR_B, clear)
+    st = hass.states.get(f.b)
+    assert (st.state, st.attributes["temperature"], f.zone(1)["hands_off"]) == (mode, new, "released")
+    assert sent == ([] if during == new else [(mode, during), (mode, new)])
+
+
+@pytest.mark.parametrize(
+    ("new", "during"), [((74, 76), (74, 76)), ((56, 58), (59, 61))], ids=["raised", "lowered"]
+)
+async def test_p15_the_persons_latest_setting_survives_a_restart_mid_run(
+    hass: HomeAssistant, new, during
+) -> None:
+    """P15, restore-state continuity: the person's mid-run change is what the
+    enable switch stores as ``floor_prior`` (the same record as before), so a
+    restart mid-run runs the head as before it and the clear gives back
+    their latest setting, not the one MXZ took over from."""
+    f = await _setup(hass, hands_off=(False, True))
+    await _persons_heat_then_trip(f, "heat", 70, 72)
+    await _remote_sets(hass, f.b, *new)
+    await f.compute()
+    await _shutdown(hass, f.entry)
+    stored = rs.async_get(hass).last_states[_eid(hass, f.entry, "_secondary_enable")]
+    assert stored.extra_data.as_dict()["floor_prior"] == {
+        "mode": "heat", "low": new[0], "high": new[1],
+    }
+    await _startup(hass, f.entry)
+    sent = _setpoint_commands(hass, f.b)
+    await f.compute()
+    assert (f.zone(1)["hands_off"], _run(hass, f.b), _theirs(f)) == (
+        "floor", ("heat", *during), ("heat", *new),
+    )
+    await f.temp(SENSOR_B, 53)
+    assert (_run(hass, f.b), f.zone(1)["hands_off"]) == (("heat", *new), "released")
+    assert sent == ([] if during == new else [("heat", *new)])
+
+
+async def test_p15_mxz_own_command_and_its_late_snapped_echo_are_not_a_person(
+    hass: HomeAssistant,
+) -> None:
+    """P15 negative: MXZ's own command is never taken for a person's change.
+    The head acknowledges MXZ's 59/61 but reports it late: first it keeps
+    showing the person's 56/58 through two updates, then it reports what its
+    grid latched, 59.2/60.8. Neither is a change of theirs, so 56/58 is
+    still what they get back at clear."""
+    f = await _setup(hass, hands_off=(False, True))
+    await f.compute()
+    await _person_sets(hass, f.b, "heat", 56, 58)
+    await f.compute()
+    head = _head(hass, f.b)
+    head._attr_precision = 0.1  # shows tenths, as a grid-snapped head does
+    told: list[dict] = []
+
+    async def acknowledge_only(**kwargs):
+        told.append(kwargs)  # the head reports later, on its own
+
+    head.async_set_temperature = acknowledge_only
+    sent = _setpoint_commands(hass, f.b)
+    await f.temp(SENSOR_B, 45)
+    assert (f.zone(1)["hands_off"], _run(hass, f.b), _theirs(f)) == (
+        "floor", ("heat", 56, 58), ("heat", 56, 58),
+    )
+    for _ in range(2):
+        await f.compute()
+    assert _theirs(f) == ("heat", 56, 58)
+    await _head_reports(hass, f.b, target_temperature_low=59.2, target_temperature_high=60.8)
+    for _ in range(2):
+        await f.compute()
+    assert (_run(hass, f.b), _theirs(f)) == (("heat", 59.2, 60.8), ("heat", 56, 58))
+    # Resent at each update while it still showed 56/58: the trip's two (the
+    # sensor's own and the forced recompute) and the two after; none since.
+    assert sent == [("heat", 59, 61)] * 4
+    await f.temp(SENSOR_B, 53)
+    assert (f.zone(1)["hands_off"], sent) == ("released", [("heat", 59, 61)] * 4 + [("heat", 56, 58)])
+
+
+async def test_p15_a_report_while_mxz_command_is_in_flight_is_not_a_person(
+    hass: HomeAssistant,
+) -> None:
+    """P15 negative: while MXZ's command to the head is still in flight (here
+    queued behind another command on that head), the head reports 64/66. MXZ
+    owns the head's writes until its command is done, so that report is not
+    taken as the person's; MXZ's command then lands, and 56/58 is still what
+    comes back at clear."""
+    f = await _setup(hass, hands_off=(False, True))
+    await _persons_heat_then_trip(f)
+    assert _run(hass, f.b) == ("heat", 59, 61)
+    sent = _setpoint_commands(hass, f.b)
+    lock = f.coord._head_locks.setdefault(f.b, asyncio.Lock())
+    await lock.acquire()  # stands in for a command still running on that head
+    # (No block_till_done while the lock is held: it would wait for the
+    # queued delivery forever.)
+    hass.states.async_set(SENSOR_B, 46, {"unit_of_measurement": hass.config.units.temperature_unit})
+    await f.coord.async_refresh()
+    assert f.b in f.coord._deliveries
+    head = _head(hass, f.b)
+    head._attr_target_temperature_low, head._attr_target_temperature_high = 64, 66
+    head.async_write_ha_state()
+    await f.coord.async_refresh()
+    assert (f.b in f.coord._deliveries, _theirs(f)) == (True, ("heat", 56, 58))
+    lock.release()
+    await hass.async_block_till_done()
+    await f.compute()
+    assert (_run(hass, f.b), _theirs(f), sent) == (
+        ("heat", 59, 61), ("heat", 56, 58), [("heat", 59, 61)],
+    )
+    await f.temp(SENSOR_B, 53)
+    assert (_run(hass, f.b), sent[1:]) == (("heat", 56, 58), [("heat", 56, 58)])
+
+
+async def test_p15_a_head_restored_at_startup_and_its_late_report_are_not_a_person(
+    hass: HomeAssistant,
+) -> None:
+    """P15 negative: across a restart the head comes back showing 64/66 (Home
+    Assistant restoring it, or the device as it was). Until MXZ has commanded
+    the head in the restored run, nothing it shows is taken as the person's;
+    a late report of that same 64/66 after MXZ's 59/61 landed is not either.
+    The person's 56/58 is still what comes back at clear."""
+    f = await _setup(hass, hands_off=(False, True))
+    await _persons_heat_then_trip(f)
+    await _shutdown(hass, f.entry)
+    await _head_reports(hass, f.b, available=False)
+    await _head_reports(
+        hass, f.b, available=True, target_temperature_low=64, target_temperature_high=66
+    )
+    sent = _setpoint_commands(hass, f.b)
+    await _startup(hass, f.entry)
+    await f.compute()
+    assert (_run(hass, f.b), _theirs(f)) == (("heat", 59, 61), ("heat", 56, 58))
+    await _head_reports(hass, f.b, target_temperature_low=64, target_temperature_high=66)
+    await f.compute()
+    assert _theirs(f) == ("heat", 56, 58)
+    await f.temp(SENSOR_B, 53)
+    assert (_run(hass, f.b), f.zone(1)["hands_off"]) == (("heat", 56, 58), "released")
+    # MXZ's 59/61 over the restored 64/66 and over the late report, then theirs.
+    assert sent == [("heat", 59, 61), ("heat", 59, 61), ("heat", 56, 58)]
+
+
+@pytest.mark.parametrize("before", ["off", "cool"])
+async def test_p15_a_run_mxz_started_itself_still_writes_its_setpoint_back(
+    hass: HomeAssistant, before: str
+) -> None:
+    """P15 negative, P4 unchanged: MXZ started the run from off (or from
+    another mode), so there is no person's run to follow. A raise to 74/76 at
+    the remote is written back to the clear line's 59/61 at the next update,
+    and at clear the head goes off (decision 5)."""
+    f = await _setup(hass, hands_off=(False, True))
+    await f.compute()
+    await _remote(hass, f.b, before)
+    await f.compute()
+    await f.temp(SENSOR_B, 45)
+    assert (_run(hass, f.b), _theirs(f)) == (("heat", 59, 61), None)
+    sent = _setpoint_commands(hass, f.b)
+    await _remote_sets(hass, f.b, 74, 76)
+    await f.compute()
+    assert (_run(hass, f.b), _theirs(f), f.zone(1)["hands_off"]) == (
+        ("heat", 59, 61), None, "floor",
+    )
+    await f.temp(SENSOR_B, 53)
+    assert (_s(hass, f.b), sent) == ("off", [("heat", 59, 61)])
+
+
+async def test_p15_a_mode_change_after_a_followed_raise_is_still_a_yield(
+    hass: HomeAssistant,
+) -> None:
+    """P15 negative, decision 8(b) unchanged: the person raises the setpoint
+    (followed), then switches the head to fan only. That is a yield: the run
+    stands down, their remembered setting is dropped from the record, and
+    nothing is sent at clear."""
+    f = await _setup(hass, hands_off=(False, True))
+    await _persons_heat_then_trip(f, "heat", 70, 72)
+    await _remote_sets(hass, f.b, 74, 76)
+    await f.compute()
+    assert _theirs(f) == ("heat", 74, 76)
+    await _remote(hass, f.b, "fan_only")
+    await f.compute()
+    assert (f.floor(1)[0], _theirs(f)) == ("yielded", None)
+    assert "floor_prior" not in f.coord.floor_record("secondary")
+    sent = _mode_commands(hass, f.b)
+    await f.temp(SENSOR_B, 53)
+    for _ in range(2):
+        await f.compute()
+    assert (_run(hass, f.b), sent, f.floor(1)[0]) == (("fan_only", 74, 76), [], "armed")
+
+
+async def test_p15_a_refused_hand_back_retries_the_persons_latest_setting(
+    hass: HomeAssistant,
+) -> None:
+    """P15 with NIT-1: the person lowered their heat from 56/58 to 54/56
+    during the run. The hand-back at clear sends 54/56; the head refuses it,
+    and the one retry at the next update sends 54/56 again and lands."""
+    f = await _setup(hass, hands_off=(False, True))
+    await _persons_heat_then_trip(f)
+    await _remote_sets(hass, f.b, 54, 56)
+    await f.compute()
+    assert (_run(hass, f.b), _theirs(f)) == (("heat", 59, 61), ("heat", 54, 56))
+    sent = _setpoint_commands(hass, f.b)
+    accept = _refusing(hass, f.b)
+    await _set_temp(hass, SENSOR_B, 53)  # one update: the hand-back is refused
+    assert (f.zone(1)["hands_off"], _run(hass, f.b)) == ("released", ("heat", 59, 61))
+    accept()
+    await f.compute()
+    assert (_run(hass, f.b), sent) == (("heat", 54, 56), [("heat", 54, 56)] * 2)
+
+
+# ---------------------------------------------------------------------------
 # Decision 6: freeze first; same kind by room order
 # ---------------------------------------------------------------------------
 async def test_d6_freeze_in_a_later_room_beats_a_ceiling_in_an_earlier_room(

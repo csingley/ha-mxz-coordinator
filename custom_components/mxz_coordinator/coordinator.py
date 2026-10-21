@@ -560,8 +560,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # (theirs, which try, the head as MXZ left it: None on the first try);
         # one in flight, as (theirs, which try, the head as MXZ left it, its
         # delivery); and a refused one's notice, kept while the head still
-        # shows MXZ's command, as (message, that head).
+        # shows MXZ's command, as (message, that head). While MXZ runs a head
+        # over a person's own run: the setpoints it last queued for it, as the
+        # head should show them, and what the head showed then (P15).
         self._floor_prior: dict[str, tuple[str, float, float]] = {}
+        self._floor_expect: dict[str, tuple[tuple[float, float], tuple | None]] = {}
         self._floor_handback: dict[str, tuple[tuple[str, float, float], int, tuple | None]] = {}
         self._floor_handing_back: dict[
             str, tuple[tuple[str, float, float], int, tuple, dict[str, Any]]
@@ -1836,12 +1839,14 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 eco_cool=self.eco_cool,
                 eco_heat=self.eco_heat,
             )
-            if floor == state and (prior := self._floor_prior.get(zone.slug)):
+            taken = floor == state and self._floor_prior.get(zone.slug)
+            if taken:
                 # A run taken over from a person's own heat keeps their
                 # setpoints where those are warmer than the clear line's
-                # (cooler, for a ceiling over their cool) (P10).
+                # (cooler, for a ceiling over their cool) (P10): their latest,
+                # if they changed them during the run (P15).
                 keep = max if floor == MODE_HEAT else min
-                low, high = keep(low, prior[1]), keep(high, prior[2])
+                low, high = keep(low, taken[1]), keep(high, taken[2])
             shown = plan[f"{zone.slug}_temp"]
             delta = 0.0 if shown is None else abs(shown - float(zone.target))
             # A floor delivery takes the fan-free path (engage None, as the
@@ -1852,6 +1857,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if task is not None:
                 tasks.append(task)
+                if taken:
+                    self._floor_expect_command(zone, state, low, high)
         await self._wait_deliveries(tasks)
 
         # Stamp the flip only on a real mode change (cool<->heat) — and never
@@ -3575,6 +3582,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._floor_view[slug] = ("enabled" if configured else "none", None)
             return None
         head = self.hass.states.get(zone.climate_id)
+        # Before anything ends the run: the end gives back their latest.
+        self._floor_follow_person(zone, head)
         if not ok:
             self._floor_end(slug, hand_back=True)
             self._floor_blind(
@@ -3690,6 +3699,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._floor_trip_held.pop(slug, None)
         self._floor_reject_noticed.discard(slug)
         self._floor_rejecting.pop(slug, None)
+        self._floor_expect.pop(slug, None)
         if hand_back:
             self._floor_hand_back(slug)
         else:
@@ -3702,24 +3712,87 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         gets the clear line's."""
         if head.state != direction:
             return  # off, another mode: decision 5 (back to off)
-        if int(head.attributes.get("supported_features") or 0) & 2:
-            low = _as_float(head.attributes.get("target_temp_low"))
-            high = _as_float(head.attributes.get("target_temp_high"))
-        else:
-            low = high = _as_float(head.attributes.get("temperature"))
-        if low is None or high is None:
-            low, high = setpoints(
+        if (setting := _floor_setting(head)) is None:
+            setting = setpoints(
                 mode=direction, target=self._floor_clear(zone, direction), eco=False,
                 clamp_min=self.clamp_min, clamp_max=self.clamp_max,
                 band=self.setpoint_band, step=self.target_step,
             )
-        self._floor_prior[zone.slug] = (direction, low, high)
+        self._floor_prior[zone.slug] = (direction, *setting)
+
+    def _floor_expect_command(
+        self, zone: Zone, mode: str, low: float, high: float
+    ) -> None:
+        """MXZ queued (low, high) for a head it runs over a person's own run:
+        remember what the head should show once it lands (clamped to the
+        head's band, and its one setpoint on a single-setpoint head, as
+        :meth:`_apply_head` sends them) and what it showed until then. Neither
+        is a person's change (P15). The same command to a head already
+        showing it replaces nothing, so what it showed before stays."""
+        head = self.hass.states.get(zone.climate_id)
+        low, high = self._clamp_to_head_band(zone.climate_id, low, high)
+        if head is not None and not (
+            int(head.attributes.get("supported_features") or 0) & 2
+        ):
+            low = high = high if mode == MODE_COOL else low
+        setting = None if head is None else _floor_setting(head)
+        known = self._floor_expect.get(zone.slug)
+        if known is not None and known[0] == (low, high) and (
+            self._floor_shows(zone.climate_id, setting, (low, high))
+        ):
+            return
+        self._floor_expect[zone.slug] = ((low, high), setting)
+
+    def _floor_shows(
+        self, climate_id: str, setting: tuple | None, want: tuple[float, float]
+    ) -> bool:
+        """Whether a head showing ``setting`` already holds ``want``, read on
+        its own grid as the idempotent check reads it."""
+        return setting is not None and all(
+            self._head_already_at(climate_id, seen, edge)
+            for seen, edge in zip(setting, want)
+        )
+
+    def _floor_follow_person(self, zone: Zone, head: Any) -> None:
+        """A person changed only the setpoints of a head MXZ runs over their
+        own run: that is their setting now. The run keeps it where it protects
+        more (P10), and it is what they get back at the end (P15).
+
+        It is a person's change only if the head is in the run's mode, MXZ has
+        nothing in flight to it and is not kicking its vanes, and it shows
+        neither MXZ's last command (on the head's own grid, as the idempotent
+        check reads it) nor what it showed before that command (a late report
+        from before it landed). Until MXZ has commanded the head in this run
+        (after a restart, its first apply), nothing is taken.
+        """
+        slug = zone.slug
+        prior, expect = self._floor_prior.get(slug), self._floor_expect.get(slug)
+        if (
+            prior is None or expect is None or head is None
+            or head.state != prior[0]
+            or zone.climate_id in self._deliveries
+            or zone.climate_id in self._vane_kicks
+        ):
+            return
+        sent, before = expect
+        setting = _floor_setting(head)
+        if setting is None or setting in (before, prior[1:]) or self._floor_shows(
+            zone.climate_id, setting, sent
+        ):
+            return
+        self._floor_prior[slug] = (prior[0], *setting)
+        _LOGGER.info(
+            "MXZ floor: %s's setpoint was changed by hand during a floor run; "
+            "MXZ keeps it where it protects the room and gives it back at the "
+            "end", zone.name,
+        )
 
     def _floor_hand_back(self, slug: str) -> None:
         """A hands-off run that MXZ took over from a person's own run in the
-        floor's direction ended without that person changing the head
+        floor's direction ended without that person changing the head's mode
         (cleared, blind or stalled): it is theirs again at once, and the next
-        apply sends it their mode and setpoint, never off (P3)."""
+        apply sends it their mode and latest setpoint, never off (P3, P15)."""
+        self._floor_expect.pop(slug, None)
         if (prior := self._floor_prior.pop(slug, None)) is not None:
             self._hands_off_released.add(slug)
             self._floor_handback[slug] = (prior, 1, None)
@@ -4198,6 +4271,17 @@ def _head_setting(head: Any) -> tuple:
         head.attributes.get(key)
         for key in ("target_temp_low", "target_temp_high", "temperature")
     ))
+
+
+def _floor_setting(head: Any) -> tuple[float, float] | None:
+    """A head's setpoints as (low, high); a single-setpoint head's one
+    setpoint is both. None if it shows none."""
+    if int(head.attributes.get("supported_features") or 0) & 2:
+        low = _as_float(head.attributes.get("target_temp_low"))
+        high = _as_float(head.attributes.get("target_temp_high"))
+    else:
+        low = high = _as_float(head.attributes.get("temperature"))
+    return None if low is None or high is None else (low, high)
 
 
 def _floor_window(value: Any) -> tuple[tuple[float, float], ...]:
