@@ -567,6 +567,37 @@ async def test_d7_rejected_floor_command_notifies_once(hass: HomeAssistant) -> N
     assert _s(hass, f.b) == "heat"
 
 
+async def test_a_rejected_floor_run_is_held_not_heat_while_the_head_refuses(
+    hass: HomeAssistant, freezer
+) -> None:
+    """Plan honesty: while the head rejects every floor command it stays off,
+    so the room shows held with the rejection as its reason, never heat. The
+    no-progress clock still charges (the fail-safe direction). The first
+    command the head accepts shows heat again."""
+    f = await _setup(hass)
+    head = _head(hass, f.b)
+    real = head.async_set_temperature
+
+    async def reject(**kwargs):
+        raise HomeAssistantError("invented rejection")
+
+    head.async_set_temperature = reject
+    await f.temp(SENSOR_B, 45)
+    held = (
+        "held",
+        f"{f.b} rejected MXZ's floor command (invented rejection). MXZ keeps trying at each update.",
+    )
+    assert (_s(hass, f.b), f.floor(1)) == ("off", held)
+    assert (f.plan.state, f.plan.attributes["mode_by_floor"]) == ("heat", True)
+    await _tick(hass, freezer, HOUR)
+    await f.compute()  # retried, rejected again
+    assert (_s(hass, f.b), f.floor(1)) == ("off", held)
+    assert f.coord._floor_runs["secondary"].driven == pytest.approx(3600, abs=1)
+    head.async_set_temperature = real
+    await f.compute()
+    assert (_s(hass, f.b), f.floor(1)) == ("heat", ("heat", None))
+
+
 async def test_d7_no_notify_service_sends_nothing_and_still_runs(hass: HomeAssistant) -> None:
     """Decision 7: notices use the integration's notification service; with
     none configured nothing is sent, and the floor still protects the room."""

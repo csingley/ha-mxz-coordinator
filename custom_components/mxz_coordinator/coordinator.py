@@ -556,6 +556,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # One notice per episode: a blind room, a rejected floor command.
         self._floor_blind_noticed: set[str] = set()
         self._floor_reject_noticed: set[str] = set()
+        # A head that rejected MXZ's floor command and has accepted none
+        # since: its error. The plan then shows held, not heat/cool.
+        self._floor_rejecting: dict[str, str] = {}
         # The clear line's margin is a constant, the unit's default demand
         # threshold; a step is the unit's setpoint step (1 °F / 0.5 °C).
         self._floor_margin: float = float(_defaults[CONF_DEMAND_THRESHOLD])
@@ -1064,8 +1067,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "safety_priority": self._zone_safety(zone),
                         "floor_low": zone.floor_low,
                         "floor_high": zone.floor_high,
-                        "floor_state": self._floor_view[zone.slug][0],
-                        "floor_reason": self._floor_view[zone.slug][1],
+                        **self._floor_attributes(zone),
                         "floor_want": floors[i],
                         **self.command_attributes(zone.climate_id),
                     }
@@ -1937,8 +1939,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         if not self._delivery_owned(active):
             return
-        if engage is None:  # fixed standby park, no fan machinery
+        if engage is None:  # fixed standby park or a floor, no fan machinery
             await self._apply_head(climate_id, act, low, high)
+            self._floor_accepted(climate_id)
             return
         if act in (MODE_COOL, MODE_HEAT):
             self._last_active[climate_id] = (act, dt_util.utcnow().timestamp())
@@ -1955,6 +1958,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not self._delivery_owned(active):
                 return
         await self._apply_head(climate_id, act, low, high)
+        self._floor_accepted(climate_id)
         if not self._delivery_owned(active):
             return
         if handback:
@@ -2095,6 +2099,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if plan:
                 for view, zone in zip(plan.get("zones", ()), self.zones):
                     view.update(self.command_attributes(zone.climate_id))
+                    view.update(self._floor_attributes(zone))
                     view["control_reasons"] = self._control_reasons(zone)
         for listener in tuple(self._delivery_listeners):
             listener()
@@ -3615,6 +3620,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """End this room's run, if any (a hands-off room then parks)."""
         self._floor_runs.pop(slug, None)
         self._floor_reject_noticed.discard(slug)
+        self._floor_rejecting.pop(slug, None)
 
     def _floor_blind(self, zone: Zone, reason: str) -> None:
         """Show the room ``blind``; notify once per episode (decision 7).
@@ -3643,21 +3649,43 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"room until it reaches {self._floor_clear(zone, direction):g} {unit}."
         )
 
+    def _floor_attributes(self, zone: Zone) -> dict[str, str | None]:
+        """The room's floor state as the plan shows it. A driven floor whose
+        head is rejecting MXZ's commands is held, not running."""
+        state, reason = self._floor_view[zone.slug]
+        err = self._floor_rejecting.get(zone.slug)
+        if state in (MODE_HEAT, MODE_COOL) and err is not None:
+            state, reason = "held", (
+                f"{zone.climate_id} rejected MXZ's floor command ({err}). MXZ "
+                "keeps trying at each update."
+            )
+        return {"floor_state": state, "floor_reason": reason}
+
     def _floor_rejected(self, climate_id: str, err: Exception) -> None:
-        """A command to a head whose floor is tripped was rejected: notify once
-        per run (decision 7); the next ordinary update tries again."""
+        """A command to a head whose floor is tripped was rejected: the plan
+        shows it held (republished as the delivery ends), and it is notified
+        once per run (decision 7); the next ordinary update tries again."""
         for zone in self.zones:
             if (
                 zone.climate_id == climate_id
                 and not zone.enable
                 and self.floor_tripped(zone.slug)
-                and zone.slug not in self._floor_reject_noticed
             ):
+                self._floor_rejecting[zone.slug] = str(err)
+                if zone.slug in self._floor_reject_noticed:
+                    continue
                 self._floor_reject_noticed.add(zone.slug)
                 self._floor_send(
                     f"{zone.name}: the floor's command to {climate_id} was rejected "
                     f"({err}). MXZ keeps trying at each update."
                 )
+
+    def _floor_accepted(self, climate_id: str) -> None:
+        """A command to this head returned (or was not needed): it is no
+        longer rejecting MXZ's floor."""
+        for zone in self.zones:
+            if zone.climate_id == climate_id:
+                self._floor_rejecting.pop(zone.slug, None)
 
     def _floor_send(self, message: str) -> None:
         """Log one floor notice and send it through the integration's
