@@ -472,7 +472,8 @@ async def test_profile_clamps_are_unchanged_by_the_press(hass: HomeAssistant) ->
 
 
 async def test_one_config_category_button_per_room(hass: HomeAssistant) -> None:
-    """Exactly one per room, on the device page, not a dashboard control."""
+    """Drift's follow-global, plus asymmetric band's two follow-derived
+    siblings, per room — all on the device page, not a dashboard control."""
     _a, _b, entry = await _setup(hass)
     reg = er.async_get(hass)
     buttons = [
@@ -480,10 +481,15 @@ async def test_one_config_category_button_per_room(hass: HomeAssistant) -> None:
         for ent in er.async_entries_for_config_entry(reg, entry.entry_id)
         if ent.domain == "button"
     ]
-    assert sorted(ent.unique_id for ent in buttons) == [
-        f"{entry.entry_id}_primary_drift_follow_global",
-        f"{entry.entry_id}_secondary_drift_follow_global",
-    ]
+    assert sorted(ent.unique_id for ent in buttons) == sorted(
+        f"{entry.entry_id}_{room}_{suffix}"
+        for room in ("primary", "secondary")
+        for suffix in (
+            "drift_follow_global",
+            "band_low_follow_derived",
+            "band_high_follow_derived",
+        )
+    )
     assert {ent.entity_category for ent in buttons} == {EntityCategory.CONFIG}
 
 

@@ -407,6 +407,7 @@ ENGAGE_SATISFIED = "satisfied"
 # tests/test_room_rename_reorder.py pin it against what the platforms register.
 ZONE_ENTITY_SUFFIXES = (
     "target", "drift", "drift_follow_global", "enable", "thermostat", "fan_auto",
+    "band_low", "band_high", "band_low_follow_derived", "band_high_follow_derived",
 )
 
 # Global helper entity keys (used for unique_id suffixes and translation keys).

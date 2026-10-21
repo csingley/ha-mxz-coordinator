@@ -5,6 +5,7 @@ from __future__ import annotations
 from homeassistant.components.number import NumberMode, RestoreNumber
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -17,7 +18,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up one target number and one drift number per zone."""
+    """Set up one target, drift, and asymmetric band-edge pair per zone."""
     coordinator: MXZCoordinator = entry.runtime_data
     entities: list[RestoreNumber] = [
         MXZTargetNumber(coordinator, zone) for zone in coordinator.zones
@@ -25,6 +26,9 @@ async def async_setup_entry(
     entities.extend(
         MXZDriftNumber(coordinator, zone) for zone in coordinator.zones
     )
+    for zone in coordinator.zones:
+        entities.append(MXZBandEdgeNumber(coordinator, zone, edge="low"))
+        entities.append(MXZBandEdgeNumber(coordinator, zone, edge="high"))
     async_add_entities(entities)
 
 
@@ -224,6 +228,107 @@ class MXZDriftNumber(MXZEntity, RestoreNumber):
         a run already headed for the (unchanged) target.
         """
         self._zone.drift = value
+        self._last_published_state = self._state_signature()
+        self.async_write_ha_state()
+        await self.coordinator.async_user_changed()
+
+
+class MXZBandEdgeNumber(MXZEntity, RestoreNumber):
+    """One independently-settable asymmetric comfort-band edge.
+
+    Unset means derive this edge from ``target`` +/- drift (see
+    ``logic.room_call``). Same follower-until-written pattern as
+    ``MXZDriftNumber``, generalized to two sibling entities via ``edge``.
+    """
+
+    _attr_mode = NumberMode.BOX
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: MXZCoordinator, zone: Zone, *, edge: str) -> None:
+        assert edge in ("low", "high")
+        super().__init__(coordinator, f"{zone.slug}_band_{edge}")
+        self._zone = zone
+        self._edge = edge
+        self._last_published_state: tuple[float, bool] | None = None
+        self._attr_icon = (
+            "mdi:thermometer-chevron-down" if edge == "low"
+            else "mdi:thermometer-chevron-up"
+        )
+        self._attr_translation_key = f"zone_band_{edge}"
+        self._attr_translation_placeholders = {"zone": zone.name}
+        self._attr_native_unit_of_measurement = coordinator.temp_unit
+        self._attr_native_step = coordinator.target_step
+        lo, hi = coordinator.head_target_bounds(zone.climate_id)
+        self._attr_native_min_value = lo
+        self._attr_native_max_value = hi
+
+    def _effective(self, edge: str) -> float:
+        explicit = getattr(self._zone, f"band_{edge}")
+        if explicit is not None:
+            return explicit
+        derived = self.coordinator.zone_drift(self._zone)
+        return self._zone.target - derived if edge == "low" else self._zone.target + derived
+
+    # LIVE, not frozen: an untouched edge must DISPLAY the band it actually
+    # follows (target +/- the room's drift), including after a target or
+    # drift change — the same reasoning as MXZDriftNumber.native_value.
+    @property
+    def native_value(self) -> float:
+        return self._effective(self._edge)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, bool]:
+        return {"override": getattr(self._zone, f"band_{self._edge}") is not None}
+
+    async def async_added_to_hass(self) -> None:
+        """Restore an explicit edge; absent/stale/not set -> stays derived."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if (
+            not self._restored_state_is_stale(last_state)
+            and last_state is not None
+            and last_state.attributes.get("override")
+            and (last := await self.async_get_last_number_data())
+            and last.native_value is not None
+        ):
+            setattr(
+                self._zone, f"band_{self._edge}",
+                min(max(last.native_value, self._attr_native_min_value),
+                    self._attr_native_max_value),
+            )
+        self._last_published_state = self._state_signature()
+        self.async_on_remove(self.coordinator.async_add_listener(self._sync))
+
+    def _state_signature(self) -> tuple[float, bool]:
+        return self.native_value, getattr(self._zone, f"band_{self._edge}") is not None
+
+    @callback
+    def _sync(self) -> None:
+        """Redraw a follower (derived display moves when target/drift do)."""
+        state = self._state_signature()
+        if state == self._last_published_state:
+            return
+        self._last_published_state = state
+        self.async_write_ha_state()
+
+    async def async_set_native_value(self, value: float) -> None:
+        """User set this edge explicitly -> recompute, same as target/drift.
+
+        Rejects a value that would cross the other edge (effective, whether
+        explicit or still derived): an inverted band_low > band_high would
+        make every temperature satisfy one of ``logic.room_call``'s two
+        comparisons, calling continuously.
+        """
+        other_edge = "high" if self._edge == "low" else "low"
+        other = self._effective(other_edge)
+        if (self._edge == "low" and value > other) or (
+            self._edge == "high" and value < other
+        ):
+            raise HomeAssistantError(
+                f"Band {self._edge} cannot cross the room's band "
+                f"{other_edge} ({other})."
+            )
+        setattr(self._zone, f"band_{self._edge}", value)
         self._last_published_state = self._state_signature()
         self.async_write_ha_state()
         await self.coordinator.async_user_changed()

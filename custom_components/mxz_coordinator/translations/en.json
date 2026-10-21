@@ -560,6 +560,12 @@
     "button": {
       "zone_drift_follow_global": {
         "name": "{zone} follow global drift"
+      },
+      "zone_band_low_follow_derived": {
+        "name": "{zone} follow derived band low"
+      },
+      "zone_band_high_follow_derived": {
+        "name": "{zone} follow derived band high"
       }
     },
     "number": {
@@ -568,6 +574,12 @@
       },
       "zone_drift": {
         "name": "{zone} drift"
+      },
+      "zone_band_low": {
+        "name": "{zone} band low"
+      },
+      "zone_band_high": {
+        "name": "{zone} band high"
       }
     },
     "switch": {

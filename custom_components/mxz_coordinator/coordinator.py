@@ -288,6 +288,29 @@ class Zone:
     # direction comes from room_call() or a hands-off vote. Static wiring,
     # same tier as climate_id/sensor_id, not a live-adjustable number.
     safety_priority_entity: str | None = None
+    # Independent asymmetric band edges, same ownership shape as drift: None
+    # = derive from target +/- the demand/engage band as today. Owned by the
+    # zone's band_low/band_high number entities, which are written
+    # independently (two separate HA entities) -- so a half-written pair IS
+    # representable here. Nothing outside ``explicit_band`` below may read
+    # these two fields directly -- a consumer re-deriving "is this room
+    # opted in" on its own can silently disagree with the others.
+    band_low: float | None = None
+    band_high: float | None = None
+
+    @property
+    def explicit_band(self) -> tuple[float, float] | None:
+        """The room's fully opted-in band, or None while anything derives.
+
+        The single source of truth for "is this room on its own explicit
+        band or still on target +/- drift" -- every consumer (demand,
+        engage, the climate tile) must ask this, never ``band_low``/
+        ``band_high`` directly, so a half-set pair reads as inert everywhere
+        or nowhere, never as a mix.
+        """
+        if self.band_low is None or self.band_high is None:
+            return None
+        return self.band_low, self.band_high
     # This SENSOR's reporting contract, as configured (durations in minutes,
     # or None when the room's cadence is unknown; the basis defaults to
     # unknown). Read once into the resolved freshness window and evidence
@@ -973,13 +996,15 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ok = valid and health != HEALTH_STALE
             all_ok = all_ok and ok
             zdrift = self.zone_drift(zone)
+            demand_floor = max(self.demand_threshold, zdrift)
+            # zone.explicit_band is the single opt-in gate shared by demand
+            # and engage below: None (either edge unset) means both still
+            # derive from target +/- their own band, never a mix.
+            explicit_low, explicit_high = zone.explicit_band or (None, None)
             demand = room_call(
                 temp=temp, target=zone.target, enabled=zone.enable,
-                # A room's demand vote respects its OWN drift (#18): a room
-                # told to tolerate a wide band must not steer the shared
-                # compressor inside it. max() reproduces today's behavior
-                # exactly whenever drift <= demand_threshold (the default).
-                sensor_ok=ok, band=max(self.demand_threshold, zdrift),
+                sensor_ok=ok, band=demand_floor,
+                target_low=explicit_low, target_high=explicit_high,
                 neutral=DEMAND_NEUTRAL,
                 **common,
             )
@@ -1017,7 +1042,12 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             engage = engage_with_latch(
                 prior=prior_engage or None,
                 temp=temp, target=zone.target, enabled=zone.enable,
-                sensor_ok=ok, band=zdrift, neutral=ENGAGE_SATISFIED,
+                # Unlike the demand vote above, engage is purely this room's
+                # own hysteresis once already running -- no cross-room
+                # concern, so no demand_floor widening once opted in.
+                sensor_ok=ok, band=zdrift,
+                target_low=explicit_low, target_high=explicit_high,
+                neutral=ENGAGE_SATISFIED,
                 **common,
             )
             if zone.slug in self._engage_latch:

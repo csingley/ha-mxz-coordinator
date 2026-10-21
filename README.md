@@ -70,7 +70,9 @@ Use [Reconfigure](#reconfigure-heads-rooms-and-sensors) to change the room list 
 - [Reconfigure heads, rooms and sensors](#reconfigure-heads-rooms-and-sensors)
 - [Configure comfort and sensor settings](#configure-comfort-and-sensor-settings) ·
   [Choose a sensor freshness contract](#choose-a-sensor-freshness-contract)
-- [Everyday control](#everyday-control) · [Who drives the fan](#who-drives-the-fan) ·
+- [Everyday control](#everyday-control) ·
+  [Give a room its own comfort band (dual setpoint)](#give-a-room-its-own-comfort-band-dual-setpoint) ·
+  [Who drives the fan](#who-drives-the-fan) ·
   [How a satisfied head idles](#how-a-satisfied-head-idles)
 - [Best practice: give the firmware your room sensor too](#best-practice-give-the-firmware-your-room-sensor-too)
 - [Diagnose a room that is waiting](#diagnose-a-room-that-is-waiting) ·
@@ -1058,6 +1060,39 @@ mode, and `mode_by_safety` is true then too. `standoff` counts a floor's want. A
 run from its own remote reads `floor` in `hands_off` during a run. The room tile stays
 `off` (the room is still disabled); while a floor is tripped its action follows the
 head, as it does for a room run from its own remote.
+
+### Give a room its own comfort band (dual setpoint)
+
+A room's hysteresis is `target ± drift` by default. Set **both Band low and
+Band high** (Configure → Rooms → (room), or the room's number entities) to
+replace them. Both are unset by default, and setting only one does nothing —
+a room is either fully on `target`+drift or fully on its own explicit band,
+never a mix:
+
+- **Either edge unset:** the room is on `target ± drift` for everything —
+  the engage band, the demand vote (the shared-compressor call), and the
+  tile. A lone edge you've written is inert until its sibling is too.
+- **Both edges set:** drift no longer applies to this room. The engage band
+  and demand vote use those numbers verbatim, with no widening against drift
+  or the mode switch threshold.
+
+Press **Follow derived band low/high** to release an edge back to
+`target ± drift` (and drop the room back out of its explicit band, since
+both must be set for it to apply). An edge can't be set past its sibling
+(explicit or still derived); that write is rejected rather than accepted
+inverted.
+
+With both edges set, the room's thermostat tile also switches from the usual
+single-number "Auto" tile to a native two-handle range control
+(`target_temperature_low`/`target_temperature_high`), so HA's thermostat/tile
+cards, Apple Home and Google Home render a real two-handle dial. Dragging a
+handle writes straight back to that room's Band low/Band high.
+
+A room's band is a comfort setting, not a hardware promise: if the real head
+doesn't support a genuine two-setpoint command, MXZ falls back to the
+clamped single setpoint matching the direction currently running (high edge
+while cooling, low edge while heating) — the same fallback an ordinary
+single-setpoint room already uses.
 
 ### Who drives the fan
 

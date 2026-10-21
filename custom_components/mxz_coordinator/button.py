@@ -21,11 +21,16 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up one follow-global drift button per zone."""
+    """Set up one follow-global drift button, and two follow-derived band
+    edge buttons, per zone."""
     coordinator: MXZCoordinator = entry.runtime_data
-    async_add_entities(
+    entities: list[ButtonEntity] = [
         MXZDriftFollowGlobalButton(coordinator, zone) for zone in coordinator.zones
-    )
+    ]
+    for zone in coordinator.zones:
+        entities.append(MXZBandEdgeFollowDerivedButton(coordinator, zone, edge="low"))
+        entities.append(MXZBandEdgeFollowDerivedButton(coordinator, zone, edge="high"))
+    async_add_entities(entities)
 
 
 class MXZDriftFollowGlobalButton(MXZEntity, ButtonEntity):
@@ -139,5 +144,93 @@ class MXZDriftFollowGlobalButton(MXZEntity, ButtonEntity):
                 "disabled or missing, or has not finished loading."
             )
         self._zone.drift = None
+        self.coordinator.async_update_listeners()
+        await self.coordinator.async_user_changed()
+
+
+class MXZBandEdgeFollowDerivedButton(MXZEntity, ButtonEntity):
+    """Drop this room's explicit band edge, going back to target +/- drift.
+
+    Same pattern as ``MXZDriftFollowGlobalButton``: the edge is an override
+    until cleared here. Leaves the other edge and everything else untouched.
+    """
+
+    _attr_icon = "mdi:backup-restore"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: MXZCoordinator, zone: Zone, *, edge: str) -> None:
+        assert edge in ("low", "high")
+        super().__init__(coordinator, f"{zone.slug}_band_{edge}_follow_derived")
+        self._zone = zone
+        self._edge = edge
+        self._band_unique_id = (
+            f"{coordinator.config_entry.entry_id}_{zone.slug}_band_{edge}"
+        )
+        self._last_band_available: bool | None = None
+        self._attr_translation_key = f"zone_band_{edge}_follow_derived"
+        self._attr_translation_placeholders = {"zone": zone.name}
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._last_band_available = self._band_available()
+        self.async_on_remove(
+            self.hass.bus.async_listen(
+                er.EVENT_ENTITY_REGISTRY_UPDATED, self._handle_owner_update
+            )
+        )
+        self.async_on_remove(
+            self.hass.bus.async_listen(
+                EVENT_STATE_CHANGED,
+                self._handle_owner_update,
+                event_filter=self._is_owner_state,
+            )
+        )
+
+    @callback
+    def _is_owner_state(self, data: dict) -> bool:
+        return data["entity_id"] == er.async_get(self.hass).async_get_entity_id(
+            "number", DOMAIN, self._band_unique_id
+        )
+
+    def _band_available(self) -> bool:
+        registry = er.async_get(self.hass)
+        entity_id = registry.async_get_entity_id(
+            "number", DOMAIN, self._band_unique_id
+        )
+        if entity_id is None:
+            return False
+        entry = registry.async_get(entity_id)
+        if entry is None or entry.disabled:
+            return False
+        component = self.hass.data.get("entity_components", {}).get("number")
+        owner = component.get_entity(entity_id) if component is not None else None
+        state = self.hass.states.get(entity_id)
+        return (
+            owner is not None
+            and owner.hass is self.hass
+            and owner.coordinator is self.coordinator
+            and state is not None
+            and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+        )
+
+    @callback
+    def _handle_owner_update(self, _event: Event) -> None:
+        available = self._band_available()
+        if available == self._last_band_available:
+            return
+        self._last_band_available = available
+        self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        return self._band_available()
+
+    async def async_press(self) -> None:
+        if not self._band_available():
+            raise HomeAssistantError(
+                f"Cannot follow the derived band while this room's band_{self._edge} "
+                "number is disabled or missing, or has not finished loading."
+            )
+        setattr(self._zone, f"band_{self._edge}", None)
         self.coordinator.async_update_listeners()
         await self.coordinator.async_user_changed()

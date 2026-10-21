@@ -1,16 +1,13 @@
-"""Native single-target room thermostats (HomeKit/Google-facing facade).
+"""Native single- or dual-target room thermostats (HomeKit/Google-facing facade).
 
-Each room (primary, secondary) is exposed as a single-setpoint thermostat that
-HomeKit/Google render as a clean Tesla/Nest-style "Auto" tile: one number, the
-system picks heat vs cool. These entities own NO state of their own. They READ the
-coordinator's plan/targets for display and WRITE by driving the integration's own
-``number.*_target`` / ``switch.*_enable`` entities (the single source of truth +
-restore layer) -- exactly as the echavet proxy's ``coordinator_single_target`` mode
-drives the legacy ``input_number``/``input_boolean`` helpers, redirected to this
-integration's entities. The coordinator stays the sole writer to the real heads.
+Single-setpoint "Auto" tile by default. A room with BOTH band_low/band_high
+set instead gets a real two-handle range tile (ClimateEntityFeature.
+TARGET_TEMPERATURE_RANGE). One edge set keeps the single-target tile;
+there's no good number to show on the unset handle.
 
-Optional vane ``select`` entities are mirrored as swing modes so the native tile
-keeps vane control, removing the need for the proxy entirely.
+These entities own no state: they read the coordinator's plan/targets and
+write through number.*/switch.* entities. Vane ``select`` entities are
+mirrored as swing modes too.
 
 An optional per-zone "airflow" (``stage``) sensor keeps the tile's fan display
 HONEST while the coordinator has handed the fan back to the firmware's own
@@ -27,6 +24,8 @@ from typing import Any, ClassVar
 
 from homeassistant.components.climate import (
     ATTR_HVAC_MODE,
+    ATTR_TARGET_TEMP_HIGH,
+    ATTR_TARGET_TEMP_LOW,
     ClimateEntity,
     ClimateEntityFeature,
     HVACAction,
@@ -128,11 +127,22 @@ class MXZRoomClimate(MXZEntity, CoordinatorEntity[MXZCoordinator], ClimateEntity
         }
 
     @property
+    def _dual_setpoint(self) -> bool:
+        """Both edges set -> dual tile. One edge has no number for the other handle."""
+        return self._zone.explicit_band is not None
+
+    @property
     def supported_features(self) -> ClimateEntityFeature:
         """Advertise fan control only when the underlying head really does."""
+        features = self._base_features
+        if self._dual_setpoint:
+            features = (
+                features & ~ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+            )
         if head_fan_modes(self.hass, self._head_id) is not None:
-            return self._base_features | ClimateEntityFeature.FAN_MODE
-        return self._base_features
+            features |= ClimateEntityFeature.FAN_MODE
+        return features
 
     async def async_added_to_hass(self) -> None:
         """Re-render when the underlying head changes (fan/vane reflected live)."""
@@ -204,7 +214,19 @@ class MXZRoomClimate(MXZEntity, CoordinatorEntity[MXZCoordinator], ClimateEntity
 
     @property
     def target_temperature(self) -> float | None:
+        if self._dual_setpoint:
+            return None
         return self._zone.target
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        explicit = self._zone.explicit_band
+        return explicit[0] if explicit else None
+
+    @property
+    def target_temperature_high(self) -> float | None:
+        explicit = self._zone.explicit_band
+        return explicit[1] if explicit else None
 
     @property
     def hvac_mode(self) -> HVACMode:
@@ -351,34 +373,48 @@ class MXZRoomClimate(MXZEntity, CoordinatorEntity[MXZCoordinator], ClimateEntity
 
     # -- write paths (drive the helper entities; never coordinator state) ---
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Single-target write -> drive the room's number entity.
-
-        Honors ``hvac_mode`` when the caller includes it: HA's
-        ``climate.set_temperature`` service passes it straight through in
-        kwargs, and entities are expected to apply it, so a script that sends
-        ``hvac_mode: heat_cool`` + a temperature to a room that is OFF must
-        turn the room on rather than silently drop the mode (#17).
-
-        Applied FIRST, through the same enable switch ``async_set_hvac_mode``
-        drives (never the head): the mode then still lands if the temperature
-        half is a no-op (no ``temperature`` key, or the number entity isn't
-        resolvable). Both writes are absorbed by one debounced recompute, so
-        the plan sees the new mode and setpoint together.
-        """
+        """Drive the room's number entity/ies. Applies hvac_mode first so a
+        script sending hvac_mode+temperature to an OFF room still turns it
+        on (#17), even if the temperature half is a no-op."""
         if (hvac_mode := kwargs.get(ATTR_HVAC_MODE)) is not None:
             await self.async_set_hvac_mode(hvac_mode)
-        temp = kwargs.get(ATTR_TEMPERATURE)
-        target_eid = self._sibling_eid("number", f"{self._zone.slug}_target")
-        if temp is None or target_eid is None:
+        if self._dual_setpoint:
+            step = self.coordinator.target_step or 1.0
+            low_val = self._snap(kwargs.get(ATTR_TARGET_TEMP_LOW), step)
+            high_val = self._snap(kwargs.get(ATTR_TARGET_TEMP_HIGH), step)
+            low = (f"{self._zone.slug}_band_low", low_val)
+            high = (f"{self._zone.slug}_band_high", high_val)
+            # Order matters: each write is checked against the OTHER edge's
+            # current value by the number entity's own inversion guard, so
+            # moving the low edge past today's high (or vice versa) must
+            # raise that other edge first, or the still-stale sibling value
+            # rejects a perfectly valid final pair.
+            _, old_high = self._zone.explicit_band
+            first, second = (
+                (high, low) if low_val is not None and low_val > old_high
+                else (low, high)
+            )
+            await self._write_number(*first)
+            await self._write_number(*second)
             return
-        # Snap to the unit resolution (whole °F / 0.5 °C). The number entity
-        # seeds the coordinator + recomputes (number.py).
         step = self.coordinator.target_step or 1.0
-        value = round(float(temp) / step) * step
+        await self._write_number(
+            f"{self._zone.slug}_target", self._snap(kwargs.get(ATTR_TEMPERATURE), step)
+        )
+
+    @staticmethod
+    def _snap(temp: float | None, step: float) -> float | None:
+        return None if temp is None else round(float(temp) / step) * step
+
+    async def _write_number(self, key: str, value: float | None) -> None:
+        """Push an already-snapped value to one sibling number entity."""
+        entity_id = self._sibling_eid("number", key)
+        if value is None or entity_id is None:
+            return
         await self.hass.services.async_call(
             "number",
             "set_value",
-            {"entity_id": target_eid, "value": value},
+            {"entity_id": entity_id, "value": value},
             blocking=True,
         )
 

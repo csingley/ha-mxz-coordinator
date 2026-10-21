@@ -793,6 +793,115 @@ async def test_no_stage_sensor_is_plain_passthrough(hass: HomeAssistant) -> None
     assert hass.states.get(prim).attributes["fan_mode"] == "auto"
 
 
+# --- Dual-setpoint facade (band_low/band_high fully opted in) -----------------
+
+
+async def _set_band(
+    hass: HomeAssistant, entry: MockConfigEntry, suffix: str, value: float
+) -> None:
+    await hass.services.async_call(
+        "number", "set_value",
+        {"entity_id": _eid(hass, entry, suffix), "value": value},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+
+async def test_single_edge_keeps_single_target_tile(hass: HomeAssistant) -> None:
+    """Only one edge set -> the tile stays single-target (no good number for
+    the other handle yet, so dual mode waits for a full opt-in)."""
+    entry, _, _ = await _setup(hass)
+    await _set_band(hass, entry, "_primary_band_low", 66)
+
+    prim = hass.states.get(_eid(hass, entry, "_primary_thermostat"))
+    feats = prim.attributes["supported_features"]
+    assert feats & ClimateEntityFeature.TARGET_TEMPERATURE
+    assert not (feats & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE)
+    assert "target_temp_low" not in prim.attributes
+    assert "target_temp_high" not in prim.attributes
+
+
+async def test_both_edges_set_switches_to_range_tile(hass: HomeAssistant) -> None:
+    """Both edges set -> a real HomeKit/Google dual-threshold range tile."""
+    entry, _, _ = await _setup(hass)
+    await _set_band(hass, entry, "_primary_band_low", 66)
+    await _set_band(hass, entry, "_primary_band_high", 76)
+
+    prim = hass.states.get(_eid(hass, entry, "_primary_thermostat"))
+    feats = prim.attributes["supported_features"]
+    assert feats & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+    assert not (feats & ClimateEntityFeature.TARGET_TEMPERATURE)
+    assert "temperature" not in prim.attributes
+    assert prim.attributes["target_temp_low"] == 66
+    assert prim.attributes["target_temp_high"] == 76
+
+
+async def test_range_write_drives_both_band_numbers(hass: HomeAssistant) -> None:
+    """climate.set_temperature with both edges writes both number entities."""
+    entry, _, _ = await _setup(hass)
+    await _set_band(hass, entry, "_primary_band_low", 66)
+    await _set_band(hass, entry, "_primary_band_high", 76)
+    prim = _eid(hass, entry, "_primary_thermostat")
+
+    await hass.services.async_call(
+        "climate", "set_temperature",
+        {"entity_id": prim, "target_temp_low": 64, "target_temp_high": 78},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert float(hass.states.get(_eid(hass, entry, "_primary_band_low")).state) == 64.0
+    assert float(hass.states.get(_eid(hass, entry, "_primary_band_high")).state) == 78.0
+    assert entry.runtime_data.zones[0].band_low == 64
+    assert entry.runtime_data.zones[0].band_high == 78
+    assert hass.states.get(prim).attributes["target_temp_low"] == 64
+    assert hass.states.get(prim).attributes["target_temp_high"] == 78
+
+
+async def test_range_write_shifting_whole_band_past_old_high(
+    hass: HomeAssistant,
+) -> None:
+    """Moving both edges up past the room's OLD high must not transiently
+    reject the low write against the still-stale sibling value."""
+    entry, _, _ = await _setup(hass)
+    await _set_band(hass, entry, "_primary_band_low", 66)
+    await _set_band(hass, entry, "_primary_band_high", 72)
+    prim = _eid(hass, entry, "_primary_thermostat")
+
+    await hass.services.async_call(
+        "climate", "set_temperature",
+        {"entity_id": prim, "target_temp_low": 80, "target_temp_high": 85},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.zones[0].band_low == 80
+    assert entry.runtime_data.zones[0].band_high == 85
+
+
+async def test_range_write_with_hvac_mode_turns_room_on(hass: HomeAssistant) -> None:
+    """Same #17 contract as the single-target write, for the dual-setpoint path."""
+    entry, _, _ = await _setup(hass)
+    await _set_band(hass, entry, "_primary_band_low", 66)
+    await _set_band(hass, entry, "_primary_band_high", 76)
+    prim = _eid(hass, entry, "_primary_thermostat")
+    assert hass.states.get(prim).state == "off"
+
+    await hass.services.async_call(
+        "climate", "set_temperature",
+        {
+            "entity_id": prim, "hvac_mode": "heat_cool",
+            "target_temp_low": 65, "target_temp_high": 77,
+        },
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(_eid(hass, entry, "_primary_enable")).state == "on"
+    assert entry.runtime_data.zones[0].band_low == 65
+    assert entry.runtime_data.zones[0].band_high == 77
+
+
 async def test_selecting_displayed_rung_forwards_as_hold(hass: HomeAssistant) -> None:
     """Picking the mapped-displayed speed forwards it to the head as a real hold."""
     entry, head_a, _ = await _setup(

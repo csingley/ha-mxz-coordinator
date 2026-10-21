@@ -48,6 +48,8 @@ def room_call(
     heat_lockout_floor: float = 0.0,
     cool_lockout: bool = False,
     cool_lockout_ceiling: float = 200.0,
+    target_low: float | None = None,
+    target_high: float | None = None,
 ) -> str:
     """Per-room call for one band (demand uses S/'neutral', engage uses D/'satisfied').
 
@@ -59,6 +61,9 @@ def room_call(
     ``cool_lockout`` is the mirror for the cold season: it holds off the cool call
     (let the room drift down on its own) UNLESS it rises above ``cool_lockout_ceiling``.
     The eco extremes are unaffected; the two lockouts are independent.
+
+    ``target_low``/``target_high`` override ``target ± band`` per edge when
+    given; either may be left ``None`` to stay derived.
     """
     if not enabled:
         return MODE_OFF
@@ -70,11 +75,13 @@ def room_call(
         if temp < eco_heat_min:
             return MODE_HEAT
         return neutral
-    if temp > target + band:
+    low = target - band if target_low is None else target_low
+    high = target + band if target_high is None else target_high
+    if temp > high:
         if cool_lockout and temp <= cool_lockout_ceiling:
             return neutral
         return MODE_COOL
-    if temp < target - band:
+    if temp < low:
         if heat_lockout and temp >= heat_lockout_floor:
             return neutral
         return MODE_HEAT
