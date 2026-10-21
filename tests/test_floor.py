@@ -901,6 +901,30 @@ async def test_flapping_sensor_reverses_the_compressor_at_most_once_per_wait(
     assert (f.plan.state, _s(hass, f.a)) == ("cool", "cool")
 
 
+async def test_d4_a_flapping_unusable_sensor_reverses_at_most_once_per_wait(
+    hass: HomeAssistant,
+) -> None:
+    """Decision 4 / flapping: the guest sensor drops out and comes back below
+    the floor again and again inside one wait while the living room calls
+    cool. Each dropout ends the run and each return trips a new one, but the
+    compressor reverses at most once per wait."""
+    f = await _setup(hass, hysteresis=None)
+    await f.temp(SENSOR_A, 76)
+    f.coord._last_mode_change_ts = 0.0
+    seen, floor_states = [], []
+    for value in (45, "unavailable", 45, "unknown", 44, "unavailable", 45):
+        if isinstance(value, str):
+            hass.states.async_set(SENSOR_B, value)
+            await hass.async_block_till_done()
+            await f.compute()
+        else:
+            await f.temp(SENSOR_B, value)
+        seen.append(f.plan.state)
+        floor_states.append(f.floor(1)[0])
+    assert _reversals(seen, "cool") <= 1
+    assert floor_states == ["heat", "blind", "heat", "blind", "heat", "blind", "heat"]
+
+
 async def test_disabling_below_the_floor_trips_and_enabling_takes_the_enabled_path(
     hass: HomeAssistant,
 ) -> None:
