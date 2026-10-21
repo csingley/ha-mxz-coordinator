@@ -2370,7 +2370,7 @@ class MXZOptionsFlow(OptionsFlow):
                 data_schema=_room_schema(
                     values, temperature_unit=unit, floor_expanded=True
                 ),
-                errors={_FLOOR_SECTION: "floor_out_of_range"},
+                errors={"base": "floor_out_of_range"},
                 description_placeholders=title,
             )
         # Every field is rendered and a pre-filled field the user leaves

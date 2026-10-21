@@ -1700,8 +1700,8 @@ async def test_config_ranges_per_unit_reject_without_saving(
     hass: HomeAssistant, metric: bool, field: str, value: float, ok: bool
 ) -> None:
     """°C installs: the accepted range follows the HA unit (35-65 / 75-100 °F,
-    2-18 / 24-38 °C); a value outside it is rejected on the floor section and
-    nothing is saved."""
+    2-18 / 24-38 °C); a value outside it is rejected with a page-level error
+    (``base``, where the room page's other error shows) and nothing is saved."""
     f = await _setup(hass, metric=metric, floors=((None, None), (None, None)))
     before = [dict(z) for z in f.entry.data[CONF_ZONES]]
     manager = hass.config_entries.options
@@ -1713,7 +1713,7 @@ async def test_config_ranges_per_unit_reject_without_saving(
         assert f.entry.data[CONF_ZONES][1][field] == float(value)
     else:
         assert result["type"] is FlowResultType.FORM
-        assert result["errors"] == {"floor": "floor_out_of_range"}
+        assert result["errors"] == {"base": "floor_out_of_range"}
         assert f.entry.data[CONF_ZONES] == before
 
 
