@@ -23,6 +23,10 @@ NOREPLY = re.compile(r"^(?:\d+\+)?([A-Za-z0-9][A-Za-z0-9-]*)@users\.noreply\.git
 PROFILE_LINK = re.compile(r"github\.com/([A-Za-z0-9][A-Za-z0-9-]*)/?(?=[)\s>\]\"']|$)")
 MENTION = re.compile(r"(?<![\w.@/])@([A-Za-z0-9][A-Za-z0-9-]*)")
 TRAILER = re.compile(r"^co-authored-by:\s*(.*?)\s*<([^>]*)>\s*$", re.IGNORECASE | re.MULTILINE)
+# Co-author emails that are not GitHub noreply addresses, for a co-author with
+# no commit of their own in the range. Lower-case email -> GitHub login; public
+# commit emails only.
+KNOWN_LOGINS = {"csingley@gmail.com": "csingley"}
 
 
 # Pure parsing ---------------------------------------------------------------
@@ -51,6 +55,19 @@ def noreply_login(email):
 def coauthors(message):
     """(name, email) for every Co-authored-by trailer, key case-insensitive."""
     return TRAILER.findall(message)
+
+
+def coauthor_login(email, range_logins, known=None):
+    """GitHub login for a co-author's email, or None if nothing here knows it.
+
+    In order: the noreply form, the checked-in map, then the login GitHub gave
+    a commit in the range whose author email is this one (``range_logins``,
+    lower-case email -> login). An unknown co-author is reported by name and
+    email, so it shows as missing rather than being dropped.
+    """
+    key = (email or "").strip().lower()
+    return (noreply_login(email) or (KNOWN_LOGINS if known is None else known).get(key)
+            or range_logins.get(key))
 
 
 def is_skipped(*identities):
@@ -125,12 +142,17 @@ def commit_login(repo, sha, name, email):
 def collect(repo, tag):
     candidates = []
     log = run("git", "log", f"{tag}..HEAD", "--format=%H%x1f%an%x1f%ae%x1f%B%x1e")
-    for sha, name, email, message in parse_log(log):
+    commits = parse_log(log)
+    range_logins = {}
+    for sha, name, email, _message in commits:
         login = commit_login(repo, sha, name, email)
         if not is_skipped(login, name, email):
             candidates.append((login or f"{name} <{email}>", f"commit {sha[:7]}"))
+            if login:
+                range_logins.setdefault(email.strip().lower(), login)
+    for sha, _name, _email, message in commits:
         for co_name, co_email in coauthors(message):
-            handle = noreply_login(co_email) or co_name
+            handle = coauthor_login(co_email, range_logins) or f"{co_name} <{co_email}>"
             if not is_skipped(handle, co_name, co_email):
                 candidates.append((handle, f"co-author {sha[:7]}"))
     since = datetime.fromisoformat(run("git", "log", "-1", "--format=%cI", f"{tag}^{{commit}}").strip())
