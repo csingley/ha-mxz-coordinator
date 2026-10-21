@@ -1814,6 +1814,12 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 eco_cool=self.eco_cool,
                 eco_heat=self.eco_heat,
             )
+            if floor == state and (prior := self._floor_prior.get(zone.slug)):
+                # A run taken over from a person's own heat keeps their
+                # setpoints where those are warmer than the clear line's
+                # (cooler, for a ceiling over their cool) (P10).
+                keep = max if floor == MODE_HEAT else min
+                low, high = keep(low, prior[1]), keep(high, prior[2])
             shown = plan[f"{zone.slug}_temp"]
             delta = 0.0 if shown is None else abs(shown - float(zone.target))
             # A floor delivery takes the fan-free path (engage None, as the
