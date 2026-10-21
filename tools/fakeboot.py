@@ -10,7 +10,11 @@ It offsets ``time.monotonic`` so the clock reads ``FAKE_UPTIME`` seconds
 up at the real rate. ``asyncio``'s ``loop.time()`` reads ``time.monotonic`` on
 each call, so Home Assistant's timers stay consistent with it. ``-p`` loads
 this before the installed plugins, so freezegun (``freezer``) records this
-clock as its real one and puts it back when a frozen test ends. If anything
+clock as its real one and puts it back when a frozen test ends. Inside a
+``freezer`` test, though, freezegun replaces ``time.monotonic`` with its own,
+which reads the frozen wall-clock epoch, so this guard does not cover a
+long-ago sentinel written inside a frozen test: there ``0.0`` still reads as
+long ago on any host. If anything
 else leaves ``time.monotonic`` replaced, the next test errors instead of
 quietly running on the real clock. The log carries ``FAKEBOOT_UPTIME=<s>``
 once, as evidence the run was made on this clock.
