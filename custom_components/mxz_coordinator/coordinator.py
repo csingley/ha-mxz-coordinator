@@ -556,9 +556,17 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._floor_view: dict[str, tuple[str, str | None]] = {}
         # A hands-off run MXZ took over from a person already running the
         # head in the floor's direction: their (mode, low, high), given back
-        # when the run ends (P3); and a hand-back for the next apply to send.
+        # when the run ends (P3); a hand-back for the next apply to send, as
+        # (theirs, which try, the head as MXZ left it: None on the first try);
+        # one in flight, as (theirs, which try, the head as MXZ left it, its
+        # delivery); and a refused one's notice, kept while the head still
+        # shows MXZ's command, as (message, that head).
         self._floor_prior: dict[str, tuple[str, float, float]] = {}
-        self._floor_handback: dict[str, tuple[str, float, float]] = {}
+        self._floor_handback: dict[str, tuple[tuple[str, float, float], int, tuple | None]] = {}
+        self._floor_handing_back: dict[
+            str, tuple[tuple[str, float, float], int, tuple, dict[str, Any]]
+        ] = {}
+        self._floor_handback_note: dict[str, tuple[str, tuple]] = {}
         # One notice per episode: a blind room, a rejected floor command.
         self._floor_blind_noticed: set[str] = set()
         self._floor_reject_noticed: set[str] = set()
@@ -1770,9 +1778,18 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ):
                         # A floor run ended on a head a person was already
                         # running that way: theirs again, as they had it (P3).
-                        task = self._queue_delivery(zone.climate_id, *back)
-                        if task is not None:
-                            tasks.append(task)
+                        # A retry goes only over MXZ's own command, never
+                        # over a change made since.
+                        theirs, attempt, left = back
+                        seen = _head_setting(head)
+                        if left is None or seen == left:
+                            task = self._queue_delivery(zone.climate_id, *theirs)
+                            if task is not None:
+                                tasks.append(task)
+                                self._floor_handing_back[zone.slug] = (
+                                    theirs, attempt, seen,
+                                    self._deliveries[zone.climate_id],
+                                )
                     continue  # its off landed: the head is someone else's now
                 head = self.hass.states.get(zone.climate_id)
                 if (
@@ -1939,7 +1956,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "MXZ: applying %s to %s failed (zone degraded, others continue): %s",
                 act, climate_id, err,
             )
-            self._floor_rejected(climate_id, err)
+            self._floor_rejected(climate_id, err, active)
         except Exception as err:
             # Unexpected dependency failures retain the existing global failure
             # and restore-channel semantics, even if this head outlives a plan.
@@ -1973,7 +1990,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         if engage is None:  # fixed standby park or a floor, no fan machinery
             await self._apply_head(climate_id, act, low, high)
-            self._floor_accepted(climate_id)
+            self._floor_accepted(climate_id, active)
             return
         if act in (MODE_COOL, MODE_HEAT):
             self._last_active[climate_id] = (act, dt_util.utcnow().timestamp())
@@ -1990,7 +2007,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not self._delivery_owned(active):
                 return
         await self._apply_head(climate_id, act, low, high)
-        self._floor_accepted(climate_id)
+        self._floor_accepted(climate_id, active)
         if not self._delivery_owned(active):
             return
         if handback:
@@ -3545,6 +3562,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # The seed compute: nothing is restored yet, so nothing is decided.
             self._floor_view[slug] = ("armed" if configured else "none", None)
             return None
+        self._floor_flush_handback(zone, self.hass.states.get(zone.climate_id))
         if not configured or zone.enable:
             self._floor_end(slug)
             self._floor_yield.pop(slug, None)
@@ -3699,7 +3717,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         apply sends it their mode and setpoint, never off (P3)."""
         if (prior := self._floor_prior.pop(slug, None)) is not None:
             self._hands_off_released.add(slug)
-            self._floor_handback[slug] = prior
+            self._floor_handback[slug] = (prior, 1, None)
 
     def _floor_blind(self, zone: Zone, reason: str, kind: str = "blind") -> None:
         """Show the room ``blind``; notify once per episode (decision 7).
@@ -3751,13 +3769,21 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return {"floor_state": state, "floor_reason": reason}
 
-    def _floor_rejected(self, climate_id: str, err: Exception) -> None:
+    def _floor_rejected(
+        self, climate_id: str, err: Exception, active: dict[str, Any]
+    ) -> None:
         """A command to a head whose floor is tripped was rejected: the plan
         shows it held (republished as the delivery ends), and it is notified
         once per run (decision 7); the next ordinary update tries again. A
         notice the rate limit holds back goes out at the first rejection
-        after the hour is up."""
+        after the hour is up. A refused hand-back: see
+        :meth:`_floor_handback_refused`."""
         for zone in self.zones:
+            sending = self._floor_handing_back.get(zone.slug)
+            if sending is not None and sending[3] is active:
+                del self._floor_handing_back[zone.slug]
+                self._floor_handback_refused(zone, sending, err)
+                continue
             if (
                 zone.climate_id == climate_id
                 and not zone.enable
@@ -3773,12 +3799,50 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ):
                     self._floor_reject_noticed.add(zone.slug)
 
-    def _floor_accepted(self, climate_id: str) -> None:
+    def _floor_accepted(self, climate_id: str, active: dict[str, Any]) -> None:
         """A command to this head returned (or was not needed): it is no
-        longer rejecting MXZ's floor."""
+        longer rejecting MXZ's floor, and a hand-back it carried landed."""
         for zone in self.zones:
             if zone.climate_id == climate_id:
                 self._floor_rejecting.pop(zone.slug, None)
+                sending = self._floor_handing_back.get(zone.slug)
+                if sending is not None and sending[3] is active:
+                    del self._floor_handing_back[zone.slug]
+
+    def _floor_handback_refused(
+        self, zone: Zone, sending: tuple, err: Exception
+    ) -> None:
+        """The head refused the command handing it back to its person (P3).
+        It is tried once more at the next apply, if the room is still theirs
+        and the head still shows MXZ's command; refused again, a floor notice
+        says so (NIT-1), and MXZ sends that head nothing more for it."""
+        (mode, low, high), attempt, seen, _ = sending
+        if attempt == 1:
+            self._floor_handback[zone.slug] = ((mode, low, high), 2, seen)
+            return
+        unit = self._unit_symbol()
+        setting = f"{low:g} {unit}" if low == high else f"{low:g}-{high:g} {unit}"
+        message = (
+            f"{zone.name}: the floor run is over, but {zone.climate_id} refused "
+            f"MXZ's command giving it back to {mode} at {setting}, twice ({err}). "
+            "It keeps MXZ's floor setting; MXZ sends it nothing more for this."
+        )
+        self._floor_handback_note[zone.slug] = (message, seen)
+        self._floor_flush_handback(zone, self.hass.states.get(zone.climate_id))
+
+    def _floor_flush_handback(self, zone: Zone, head: Any) -> None:
+        """Send a refused hand-back's notice; one the hourly limit holds back
+        goes out at the first compute after the hour (P5, P8), but only while
+        the room is still released and the head still shows MXZ's command."""
+        if (held := self._floor_handback_note.get(zone.slug)) is None:
+            return
+        message, seen = held
+        if self._hands_off_phase(zone) != "released" or head is None or (
+            _head_setting(head) != seen
+        ):
+            del self._floor_handback_note[zone.slug]  # no longer true
+        elif self._floor_send(zone, "handback", message):
+            del self._floor_handback_note[zone.slug]
 
     def _floor_send(self, zone: Zone, kind: str, message: str) -> bool:
         """Log one floor notice and send it; return whether it went out.
@@ -4121,6 +4185,14 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _head_setting(head: Any) -> tuple:
+    """What a head shows a person: its mode and setpoints."""
+    return (head.state, *(
+        head.attributes.get(key)
+        for key in ("target_temp_low", "target_temp_high", "temperature")
+    ))
 
 
 def _floor_window(value: Any) -> tuple[tuple[float, float], ...]:

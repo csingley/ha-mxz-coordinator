@@ -684,6 +684,119 @@ async def test_p3_a_stalled_run_hands_back_and_a_rearm_takes_it_again(
     assert "off" not in sent
 
 
+def _refusing(hass: HomeAssistant, entity_id: str):
+    """Make the head refuse every set_temperature; returns a function that
+    makes it accept them again."""
+    head = _head(hass, entity_id)
+    real = head.async_set_temperature
+
+    async def reject(**kwargs):
+        raise HomeAssistantError("invented refusal")
+
+    head.async_set_temperature = reject
+
+    def accept() -> None:
+        head.async_set_temperature = real
+
+    return accept
+
+
+async def test_nit1_a_refused_hand_back_is_tried_once_more_and_lands(
+    hass: HomeAssistant,
+) -> None:
+    """NIT-1: at clear the head refuses the command giving the person's heat
+    (56/58) back. The room is theirs again (released) and the head still
+    shows MXZ's 59/61, so the next update tries the hand-back once more; the
+    head takes it this time. No notice is sent for it, and nothing more is
+    sent after it."""
+    f = await _setup(hass, hands_off=(False, True))
+    sent = await _persons_heat_then_trip(f)
+    accept = _refusing(hass, f.b)
+    await _set_temp(hass, SENSOR_B, 53)  # one update: the hand-back is refused
+    assert (f.zone(1)["hands_off"], _run(hass, f.b)) == ("released", ("heat", 59, 61))
+    assert sent == ["heat", "heat"]
+    accept()
+    await f.compute()
+    assert (_run(hass, f.b), sent) == (("heat", 56, 58), ["heat", "heat", "heat"])
+    for _ in range(3):
+        await f.compute()
+    assert sent == ["heat", "heat", "heat"]
+    assert len(f.notes) == 1 and "freeze floor" in f.notes[0]
+
+
+@pytest.mark.parametrize("notify", [True, False], ids=["notify_service", "ha_notification"])
+@pytest.mark.parametrize("gap", [65, 5], ids=["after_the_hour", "within_the_hour"])
+async def test_nit1_a_hand_back_refused_twice_is_noticed_once_and_not_sent_again(
+    hass: HomeAssistant, freezer, notify: bool, gap: int
+) -> None:
+    """NIT-1: the head refuses the hand-back and its one retry. A floor
+    notice (kind ``handback``) says the head could not be given back, and
+    MXZ sends it nothing more: the head keeps MXZ's 59/61. The notice is
+    under the hourly limit (P5): a refusal 5 minutes after the trip notice
+    is noticed at the first update after the hour (P8), once. With no
+    working notify service it is a Home Assistant notification (P2). Only
+    the guest room's own head is ever commanded, and never its fan."""
+    f = await _setup(hass, hands_off=(False, True), notify=notify)
+    sent_notes = (lambda: f.notes) if notify else (lambda: [m for _, m in f.pinned])
+    sent = await _persons_heat_then_trip(f)
+    calls, fans = _all_climate_calls(hass), _fan_calls(hass)
+    _refusing(hass, f.b)
+    await _tick(hass, freezer, timedelta(minutes=gap))
+    await f.temp(SENSOR_B, 53)  # the hand-back is refused,
+    await f.compute()  # and so is its one retry at the next update
+    await hass.async_block_till_done()
+    assert (f.zone(1)["hands_off"], _run(hass, f.b)) == ("released", ("heat", 59, 61))
+    assert sent == ["heat", "heat", "heat"]
+    handback = (
+        f"Guest room: the floor run is over, but {f.b} refused MXZ's command giving "
+        "it back to heat at 56-58 °F, twice (invented refusal). It keeps MXZ's "
+        "floor setting; MXZ sends it nothing more for this."
+    )
+    if gap < 60:
+        assert len(sent_notes()) == 1
+        await _tick(hass, freezer, timedelta(minutes=61 - gap))
+        await f.compute()
+        await hass.async_block_till_done()
+    assert sent_notes()[1:] == [handback]
+    if not notify:
+        assert f.pinned[1][0] == f"mxz_coordinator_{f.entry.entry_id}_floor_secondary_handback"
+    for _ in range(3):
+        await f.compute()
+    await _tick(hass, freezer, 2 * HOUR)
+    await f.compute()
+    await hass.async_block_till_done()
+    assert (len(sent_notes()), sent, _run(hass, f.b)) == (2, ["heat", "heat", "heat"], ("heat", 59, 61))
+    assert {entity for entity, _ in calls} == {f.b} and fans == []
+
+
+@pytest.mark.parametrize("change", ["setpoint", "mode"])
+async def test_nit1_a_persons_change_after_a_refused_hand_back_cancels_the_retry(
+    hass: HomeAssistant, freezer, change: str
+) -> None:
+    """NIT-1: the hand-back is refused, then the person changes the head
+    themselves (new setpoints, or another mode) before the next update. The
+    retry would land over their change, so it is not sent; nor is any notice
+    about it, then or after the hour."""
+    f = await _setup(hass, hands_off=(False, True))
+    sent = await _persons_heat_then_trip(f)
+    accept = _refusing(hass, f.b)
+    await _set_temp(hass, SENSOR_B, 53)  # one update: the hand-back is refused
+    assert sent == ["heat", "heat"]
+    accept()
+    if change == "setpoint":
+        await _person_sets(hass, f.b, "heat", 64, 66)
+        theirs = ("heat", 64, 66)
+    else:
+        await _remote(hass, f.b, "fan_only")
+        theirs = ("fan_only", 59, 61)
+    for _ in range(3):
+        await f.compute()
+    await _tick(hass, freezer, 2 * HOUR)
+    await f.compute()
+    assert (_run(hass, f.b), sent[2:]) == (theirs, ["heat" if change == "setpoint" else "fan_only"])
+    assert len(f.notes) == 1
+
+
 @pytest.mark.parametrize(
     ("mode", "theirs", "ours", "mid", "clear"),
     [
