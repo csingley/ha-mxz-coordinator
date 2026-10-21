@@ -1839,8 +1839,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 eco_cool=self.eco_cool,
                 eco_heat=self.eco_heat,
             )
-            taken = floor == state and self._floor_prior.get(zone.slug)
-            if taken:
+            taken = self._floor_prior.get(zone.slug) if floor == state else None
+            if taken is not None:
                 # A run taken over from a person's own heat keeps their
                 # setpoints where those are warmer than the clear line's
                 # (cooler, for a ceiling over their cool) (P10): their latest,
@@ -1857,7 +1857,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if task is not None:
                 tasks.append(task)
-                if taken:
+                if taken is not None:
                     self._floor_expect_command(zone, state, low, high)
         await self._wait_deliveries(tasks)
 
@@ -3713,28 +3713,41 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if head.state != direction:
             return  # off, another mode: decision 5 (back to off)
         if (setting := _floor_setting(head)) is None:
-            setting = setpoints(
-                mode=direction, target=self._floor_clear(zone, direction), eco=False,
-                clamp_min=self.clamp_min, clamp_max=self.clamp_max,
-                band=self.setpoint_band, step=self.target_step,
-            )
+            setting = self._floor_line(zone, direction)
         self._floor_prior[zone.slug] = (direction, *setting)
 
-    def _floor_expect_command(
-        self, zone: Zone, mode: str, low: float, high: float
-    ) -> None:
-        """MXZ queued (low, high) for a head it runs over a person's own run:
-        remember what the head should show once it lands (clamped to the
-        head's band, and its one setpoint on a single-setpoint head, as
-        :meth:`_apply_head` sends them) and what it showed until then. Neither
-        is a person's change (P15). The same command to a head already
-        showing it replaces nothing, so what it showed before stays."""
-        head = self.hass.states.get(zone.climate_id)
+    def _floor_line(self, zone: Zone, direction: str) -> tuple[float, float]:
+        """The setpoints of a run's clear line, as :meth:`_apply` computes
+        them before it keeps a person's warmer (cooler) ones."""
+        return setpoints(
+            mode=direction, target=self._floor_clear(zone, direction), eco=False,
+            clamp_min=self.clamp_min, clamp_max=self.clamp_max,
+            band=self.setpoint_band, step=self.target_step,
+        )
+
+    def _floor_as_sent(
+        self, zone: Zone, head: Any, mode: str, low: float, high: float
+    ) -> tuple[float, float]:
+        """(low, high) as the head should show them once MXZ sends them:
+        clamped to the head's band, and its one setpoint on a single-setpoint
+        head, as :meth:`_apply_head` sends them."""
         low, high = self._clamp_to_head_band(zone.climate_id, low, high)
         if head is not None and not (
             int(head.attributes.get("supported_features") or 0) & 2
         ):
             low = high = high if mode == MODE_COOL else low
+        return (low, high)
+
+    def _floor_expect_command(
+        self, zone: Zone, mode: str, low: float, high: float
+    ) -> None:
+        """MXZ queued (low, high) for a head it runs over a person's own run:
+        remember what the head should show once it lands
+        (:meth:`_floor_as_sent`) and what it showed until then. Neither is a
+        person's change (P15). The same command to a head already showing it
+        replaces nothing, so what it showed before stays."""
+        head = self.hass.states.get(zone.climate_id)
+        low, high = self._floor_as_sent(zone, head, mode, low, high)
         setting = None if head is None else _floor_setting(head)
         known = self._floor_expect.get(zone.slug)
         if known is not None and known[0] == (low, high) and (
@@ -3760,10 +3773,13 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         It is a person's change only if the head is in the run's mode, MXZ has
         nothing in flight to it and is not kicking its vanes, and it shows
-        neither MXZ's last command (on the head's own grid, as the idempotent
-        check reads it) nor what it showed before that command (a late report
-        from before it landed). Until MXZ has commanded the head in this run
-        (after a restart, its first apply), nothing is taken.
+        neither MXZ's last command nor the run's clear line (on the head's own
+        grid, as the idempotent check reads it), nor what it showed before
+        that last command (a late report from before it landed). MXZ may have
+        sent the clear line at any point in the run, so a late report of it
+        is never theirs (P17), even after they changed it since. Until MXZ
+        has commanded the head in this run (after a restart, its first
+        apply), nothing is taken.
         """
         slug = zone.slug
         prior, expect = self._floor_prior.get(slug), self._floor_expect.get(slug)
@@ -3776,8 +3792,12 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         sent, before = expect
         setting = _floor_setting(head)
-        if setting is None or setting in (before, prior[1:]) or self._floor_shows(
-            zone.climate_id, setting, sent
+        line = self._floor_as_sent(
+            zone, head, prior[0], *self._floor_line(zone, prior[0])
+        )
+        if setting is None or setting in (before, prior[1:]) or any(
+            self._floor_shows(zone.climate_id, setting, ours)
+            for ours in (sent, line)
         ):
             return
         self._floor_prior[slug] = (prior[0], *setting)
