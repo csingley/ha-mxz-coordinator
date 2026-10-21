@@ -1072,6 +1072,23 @@ async def test_d8b_mxz_own_off_and_unavailable_do_not_yield(hass: HomeAssistant)
     assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
 
 
+async def test_p4_a_setpoint_only_change_during_a_run_is_written_back_not_a_yield(
+    hass: HomeAssistant,
+) -> None:
+    """P4 (accepted as built, documented): on a hands-off floor head a person
+    changes only the setpoint during the run. That is not a yield: the run
+    stays MXZ's and the next update writes the clear line (59/61) back."""
+    f = await _setup(hass, hands_off=(False, True))
+    await f.temp(SENSOR_B, 45)
+    assert _run(hass, f.b) == ("heat", 59, 61)
+    await _person_sets(hass, f.b, "heat", 70, 72)
+    assert f.zone(1)["hands_off"] == "floor"
+    await f.compute()
+    assert (_run(hass, f.b), f.floor(1)[0], f.zone(1)["hands_off"]) == (
+        ("heat", 59, 61), "heat", "floor",
+    )
+
+
 async def test_d8b_an_unsent_mxz_off_does_not_land_after_the_persons_change(
     hass: HomeAssistant,
 ) -> None:

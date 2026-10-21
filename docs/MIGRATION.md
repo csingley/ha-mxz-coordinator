@@ -43,9 +43,9 @@ a finite number is treated as no floor. The values are not converted if you late
 change Home Assistant's unit system; re-enter them in the new unit.
 
 While a room is disabled, a tripped floor heats it and a tripped ceiling cools it, to
-3 °F (1.5 °C) back inside, then the head goes off. A tripped freeze floor outranks
-every other want, a Safety priority room's included; a ceiling ranks with Safety
-priority rooms by room order.
+3 °F (1.5 °C) back inside, then the head goes off. A tripped freeze floor's heat beats
+every other want in any room order, a Safety priority room's cool included. A tripped
+ceiling's cool against a Safety priority room's heat goes by room order.
 
 The plan sensor gains a top-level `mode_by_floor` attribute, and each room in its
 `zones` list gains `floor_low`, `floor_high`, `floor_want`, `floor_state` and

@@ -164,8 +164,8 @@ supported hardware and setup apply. It is not tested for parity with this integr
 - **Freeze floor and overheat ceiling.** Two new, optional per-room numbers in
   Configure → Rooms → (room), empty by default. While a room is disabled, MXZ heats it
   below its floor and cools it above its ceiling, then turns the head off again. A
-  freeze floor outranks every other want, a Safety priority room's included; a ceiling
-  ranks with Safety priority rooms by room order. It never acts on a lost or stale
+  tripped freeze floor outranks every other want in any room order, a Safety priority
+  room's cool included; a ceiling against a Safety priority room goes by room order. It never acts on a lost or stale
   sensor, ends a run that makes no progress in 2 hours of running, never writes the
   fan, and never touches anything but that room's own head. It builds on the safety
   priority tier above. See
@@ -843,11 +843,12 @@ What it does:
   the away band. MXZ ends the run on the room sensor; if the head reads warmer than the
   room, its own thermostat can stop before the room reaches the clear line, and the
   no-progress limit below then ends the run.
-- **Where it ranks.** A tripped freeze floor's heat outranks every other room's want,
-  a [Safety priority](#safety-priority) room's included: freeze first, whatever the
-  room order. A tripped overheat ceiling's cool outranks every ordinary want, and
-  against a Safety priority room the earlier room in priority order wins. Two trips
-  of the same kind want the same mode, so both run. The mode-change wait still
+- **Where it ranks.** Freeze first. A tripped freeze floor's heat beats every other
+  want in any room order, including a [Safety priority](#safety-priority) room that
+  wants cool, earlier in the order or not. A tripped overheat ceiling's cool beats
+  every ordinary want; against a Safety priority room that wants heat, the earlier
+  room in priority order wins. Two trips of the same kind want the same mode, so both
+  run. The mode-change wait still
   applies; while the room waits for its mode its head is held `off` (never `fan_only`),
   and a flip a floor causes starts the wait like any other.
 - **It never writes the fan.** A floor run sends only the mode and the setpoint, so a
@@ -867,10 +868,12 @@ What it does:
   it last had, and a standby hold holds it as it holds any such head.
 - **A person at the head.** On a held-off room, MXZ puts its heat or cool back at the
   next room-sensor report or the 15-minute check. On a room run from its own remote,
-  changing the head during a run hands it to that person at once: MXZ stands down
-  until the room reaches the clear line or 4 hours pass, then the floor is armed again,
-  so someone who keeps turning the head off in a freezing room is overridden again
-  every 4 hours.
+  changing the head's mode during a run hands it to that person at once: MXZ stands
+  down until the room reaches the clear line or 4 hours pass, then the floor is armed
+  again, so someone who keeps turning the head off in a freezing room is overridden
+  again every 4 hours. Changing only the setpoint is not handing it over: on either
+  kind of room MXZ writes its clear-line setpoint back at the next update, until the
+  run ends.
 - **Standby hold and Coordinator.** It still runs under an `eco` standby hold, the
   default for a load-shed, so a held-off or own-remote head can start during one. It
   never runs under an `off` or `fan_only` hold. With Coordinator off it sends nothing;
@@ -1227,9 +1230,13 @@ Fill in that room's **Freeze floor** (and, if you want, **Overheat ceiling**) in
 Configure → Rooms → (room). Both are empty by default. While the room is disabled,
 MXZ heats it when its sensor falls below the floor (cools it above the ceiling), runs
 it 3 °F (1.5 °C) back inside, then turns the head off again. A freeze floor wins over
-every other room. It does nothing on a lost or stale sensor, gives up after 2 hours of
-running without progress, and never touches anything but that room's own head; each
-of those sends a notice through **Notify on drift**. See
+every other room's want in any room order, a Safety priority room's cool included; an
+overheat ceiling against a Safety priority room goes by room order. It does nothing on
+a lost or stale sensor, gives up after 2 hours of running without progress, and never
+touches anything but that room's own head. Each of those sends a notice through
+**Notify on drift**, or, with none set, a Home Assistant notification; at most one an
+hour per room. During a run, changing only the head's setpoint does not stop it: MXZ
+puts the clear-line setpoint back at the next update. See
 [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling).
 
 </details>
