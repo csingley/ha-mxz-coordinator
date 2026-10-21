@@ -900,14 +900,38 @@ What it does:
   cool setpoint stays, a higher one is held at the clear line's and given back at the
   end. On a held-off room, or a run MXZ started from `off` or another mode, MXZ writes
   the run's setpoint (the clear line's) back at the next update, until the run ends.
-  MXZ does not take its own commands for a person's: while a command of its own to
-  the head is in flight, nothing the head shows counts; after it, neither does the
-  head showing that command (read on the head's own setpoint steps) or a late report
-  of what it showed before it. After a Home Assistant restart nothing the head shows
-  counts until MXZ's first update of the restored run. So these are not taken as the
-  person's setting: a setpoint changed while Home Assistant is down, one set to
-  exactly the run's own setpoint, and one set to exactly what the head showed just
-  before MXZ last changed it.
+  MXZ does not take its own commands for a person's, with one limitation (last
+  below): while a command of its own to the head is in flight, nothing the head shows
+  counts. After it, three readings do
+  not count: the head showing MXZ's last command, the head showing the run's clear
+  line at any time in the run (MXZ may have sent it at any point, so a late report of
+  it is MXZ's own even after the person changed the setpoint since), and a late report
+  of what the head showed just before MXZ's last command. The command and the clear
+  line are read as the head holds them: on its own setpoint steps, within its own
+  setpoint range, and on a single-setpoint head as its one setpoint. After a Home
+  Assistant restart nothing the head shows counts until MXZ's first update of the
+  restored run. What that means for a person:
+  - A setpoint changed while MXZ's command to the head is in flight counts only if
+    the head still shows it once that command is done. If MXZ's command lands after
+    it, the change is lost and the person has to set it again.
+  - A setpoint changed at the head while Home Assistant is down is not followed:
+    after the restart, MXZ writes the floor run's setting back over it at its first
+    update. Setting that same value again by hand is not recognised either (MXZ
+    writes its setting back again) for the rest of the run, until MXZ's command to
+    the head changes. Another value they set is followed as usual and changes MXZ's
+    command, so after that the first value counts again too.
+  - A person who sets exactly the run's clear line cannot be told from MXZ's own
+    write of it, so it does not become their setting: their previous setting is what
+    they get back at the end. If that one is warmer (for a ceiling, cooler), MXZ puts
+    it back on the head at the next update.
+  - A setpoint set to exactly what the head showed just before MXZ last changed it is
+    not taken either; in practice that is almost always the person's recorded
+    setting already.
+  - A known limitation: when a person's setting is above the clear line at one edge
+    and below it at the other, MXZ's command mixes the two (59/64 °F for their
+    58/64 °F). That command is neither the clear line nor, once they change the
+    setpoint again, MXZ's last command, so a late report of it after their change is
+    taken as their setting, and is what they get back at the end.
 - **Standby hold and Coordinator.** It still runs under an `eco` standby hold, the
   default for a load-shed, so a held-off or own-remote head can start during one. It
   never runs under an `off` or `fan_only` hold. With Coordinator off it sends nothing;
