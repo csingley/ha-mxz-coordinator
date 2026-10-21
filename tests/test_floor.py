@@ -1588,16 +1588,31 @@ async def test_tile_follows_the_head_only_while_tripped(hass: HomeAssistant) -> 
     assert (state.state, state.attributes["hvac_action"]) == (HVACMode.OFF, HVACAction.OFF)
 
 
-async def test_floor_touches_only_its_own_configured_head(hass: HomeAssistant) -> None:
-    """Scope: a whole floor run commands only the configured Mitsubishi heads;
-    no other climate entity (the Carrier) is ever called."""
+@pytest.mark.parametrize("room", [0, 1], ids=["primary_floor", "secondary_floor"])
+async def test_floor_touches_only_its_own_configured_head(hass: HomeAssistant, room: int) -> None:
+    """Scope: a whole floor run (freeze trip, ceiling trip, clear) commands
+    only that room's own head. The other room is disabled with no floor and
+    its head is already off, so nothing at all is owed to it: it receives no
+    command and stays off. Run with the floor on either room, so a floor
+    sent to the wrong room's head fails either way. No other climate entity
+    (the Carrier) is ever called."""
     hass.states.async_set("climate.carrier_infinity", "heat", {"hvac_modes": ["heat", "off"]})
     calls = _all_climate_calls(hass)
-    f = await _setup(hass)
-    await f.temp(SENSOR_B, 40)
-    await f.temp(SENSOR_B, 92)
-    await f.temp(SENSOR_B, 60)
-    assert {entity for entity, _ in calls} <= {f.a, f.b}
+    floors = [(None, None), (None, None)]
+    floors[room] = (50.0, 90.0)
+    f = await _setup(hass, floors=tuple(floors), enable=("_coordinator_enable",))
+    own, other = (f.a, f.b) if room == 0 else (f.b, f.a)
+    sensor = (SENSOR_A, SENSOR_B)[room]
+    modes = _mode_commands(hass, own)
+    del calls[:]
+    await f.temp(sensor, 40)
+    assert _s(hass, own) == "heat"
+    await f.temp(sensor, 92)
+    assert _s(hass, own) == "cool"
+    await f.temp(sensor, 60)
+    assert modes == ["heat", "cool", "off"]
+    assert {entity for entity, _ in calls} == {own}
+    assert _s(hass, other) == "off"
 
 
 # ---------------------------------------------------------------------------
