@@ -54,6 +54,10 @@ SECTION_FIELDS: dict[str, tuple[str, ...]] = {
         "sample_sequence_attribute",
     ),
 }
+# Room-page-only sections (no global page owns them).
+ROOM_SECTION_FIELDS: dict[str, tuple[str, ...]] = {
+    "floor": ("floor_low", "floor_high"),
+}
 ROOM_FIELDS: tuple[str, ...] = (
     "stage",
     "vane_vertical",
@@ -61,11 +65,12 @@ ROOM_FIELDS: tuple[str, ...] = (
     "safety_priority_entity",
     "hands_off",
     *SECTION_FIELDS["freshness"],
+    *ROOM_SECTION_FIELDS["floor"],
 )
 GLOBAL_PAGES = tuple(PAGE_FIELDS)
 # Every key that exists only as flow input and must never be stored flat.
 FLOW_ONLY_KEYS = frozenset(
-    {*SECTION_FIELDS, *ROOM_FIELDS, "next_step_id"}
+    {*SECTION_FIELDS, *ROOM_SECTION_FIELDS, *ROOM_FIELDS, "next_step_id"}
 )
 
 
