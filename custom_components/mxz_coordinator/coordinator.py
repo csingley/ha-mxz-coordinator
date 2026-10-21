@@ -566,6 +566,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # and the notices held back since (each logged once). In memory only.
         self._floor_notice_at: dict[str, float] = {}
         self._floor_held_back: dict[str, set[str]] = {}
+        # A trip notice the limit held back, sent once the hour is up if its
+        # run is still going then (P8).
+        self._floor_trip_held: dict[str, str] = {}
         # A head that rejected MXZ's floor command and has accepted none
         # since: its error. The plan then shows held, not heat/cool.
         self._floor_rejecting: dict[str, str] = {}
@@ -3598,6 +3601,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._floor_notify_trip(zone, want, temp)
         elif was_stalled and not run.stalled:
             self._floor_notify_trip(zone, run.direction, temp)  # a new low re-armed it
+        elif not run.stalled and (held := self._floor_trip_held.get(slug)) is not None:
+            if self._floor_send(zone, "trip", held):  # the hour is up (P8)
+                del self._floor_trip_held[slug]
         self._floor_runs[slug] = run
         if run.stalled:
             self._floor_hand_back(slug)
@@ -3652,6 +3658,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         was enabled, the floor removed, a person changed the head) the
         person's earlier run is forgotten."""
         self._floor_runs.pop(slug, None)
+        self._floor_trip_held.pop(slug, None)
         self._floor_reject_noticed.discard(slug)
         self._floor_rejecting.pop(slug, None)
         if hand_back:
@@ -3707,6 +3714,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._floor_blind_noticed.add(zone.slug)
 
     def _floor_notify_trip(self, zone: Zone, direction: str, temp: float) -> None:
+        """Notify a trip (decision 7). One the hourly limit holds back is kept
+        and sent at the first compute after the hour while the run is still
+        going (P8); a run that ends or stalls first never sends it."""
         unit = self._unit_symbol()
         if direction == MODE_HEAT:
             what = f"below its freeze floor of {zone.floor_low:g} {unit}"
@@ -3714,11 +3724,14 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             what = f"above its overheat ceiling of {zone.floor_high:g} {unit}"
             act = "cooling"
-        self._floor_send(
-            zone, "trip",
+        message = (
             f"{zone.name} is at {temp:g} {unit}, {what}. MXZ is {act} this disabled "
             f"room until it reaches {self._floor_clear(zone, direction):g} {unit}."
         )
+        if self._floor_send(zone, "trip", message):
+            self._floor_trip_held.pop(zone.slug, None)
+        else:
+            self._floor_trip_held[zone.slug] = message
 
     def _floor_attributes(self, zone: Zone) -> dict[str, str | None]:
         """The room's floor state as the plan shows it. A driven floor whose

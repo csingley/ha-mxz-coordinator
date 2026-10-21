@@ -1019,6 +1019,79 @@ async def test_p5_two_rooms_are_limited_independently(hass: HomeAssistant, freez
     assert len(f.notes) == 3 and f.notes[2].startswith("Primary") and "blind" in f.notes[2]
 
 
+async def test_p8_a_held_back_trip_notice_goes_out_after_the_hour_while_the_run_lasts(
+    hass: HomeAssistant, freezer
+) -> None:
+    """P8: the armed guest room's sensor drops out (blind notice at T0). It
+    is back 10 minutes later at 40 °F: the trip notice is held back by the
+    hourly limit (P5). MXZ heats the held-off room, gaining half a degree
+    every half hour (a step an hour, so no stall). The trip notice, as
+    written at the trip, goes out at the first update after the hour
+    (T0+70 min), and only once in the six hours."""
+    f = await _setup(hass)
+    hass.states.async_set(SENSOR_B, "unavailable")
+    await hass.async_block_till_done()
+    await f.compute()
+    assert len(f.notes) == 1 and "blind" in f.notes[0]
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, 40)
+    assert (_s(hass, f.b), f.floor(1)[0], len(f.notes)) == ("heat", "heat", 1)
+    trip = (
+        "Guest room is at 40 °F, below its freeze floor of 50 °F. MXZ is heating "
+        "this disabled room until it reaches 53 °F."
+    )
+    temp = 40.0
+    for half_hours in range(1, 13):
+        await _tick(hass, freezer, timedelta(minutes=30))
+        temp += 0.5
+        await f.temp(SENSOR_B, temp)
+        assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
+        assert f.notes[1:] == ([trip] if half_hours >= 2 else []), half_hours
+
+
+async def test_p8_a_held_back_trip_notice_is_dropped_when_the_run_ends_first(
+    hass: HomeAssistant, freezer
+) -> None:
+    """P8 negative: the same held-back trip, but the room reaches its clear
+    line 20 minutes later. The run is over before the hour is up, so the
+    trip notice is never sent, then or after the hour."""
+    f = await _setup(hass)
+    hass.states.async_set(SENSOR_B, "unavailable")
+    await hass.async_block_till_done()
+    await f.compute()
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, 45)
+    assert (_s(hass, f.b), len(f.notes)) == ("heat", 1)
+    await _tick(hass, freezer, timedelta(minutes=20))
+    await f.temp(SENSOR_B, 53)
+    assert (_s(hass, f.b), f.floor(1)[0]) == ("off", "armed")
+    for _ in range(3):
+        await _tick(hass, freezer, timedelta(minutes=30))
+        await f.compute()
+    assert len(f.notes) == 1 and "blind" in f.notes[0]
+
+
+async def test_p8_a_held_back_trip_notice_is_dropped_when_the_run_stalls_first(
+    hass: HomeAssistant, freezer
+) -> None:
+    """P8 negative: a held-back trip whose run stalls (decision 11) is not
+    sent after the hour; the stalled notice that replaces it is."""
+    f = await _setup(hass)
+    hass.states.async_set(SENSOR_B, "unavailable")
+    await hass.async_block_till_done()
+    await f.compute()
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await f.temp(SENSOR_B, 45)
+    assert len(f.notes) == 1
+    await _tick(hass, freezer, 2 * HOUR + timedelta(seconds=5))
+    await f.compute()
+    assert f.floor(1)[0] == "blind"
+    assert len(f.notes) == 2 and "Stalled" in f.notes[1]
+    await _tick(hass, freezer, 2 * HOUR)
+    await f.compute()
+    assert len(f.notes) == 2
+
+
 # ---------------------------------------------------------------------------
 # Decision 8: a person at the wall
 # ---------------------------------------------------------------------------
