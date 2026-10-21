@@ -862,12 +862,13 @@ What it does:
   floor, cool for an overheat ceiling), MXZ runs the head at the higher of each of
   their setpoints and the clear line's (for a ceiling, the lower), so a person heating
   at 70 °F keeps 70 °F and one heating at 55 °F gets the clear line's 59 °F. It gives
-  the head back in their mode, at the setpoint they had, when the run ends: the room
-  clears, its sensor or head is lost, or the run stalls. The room is theirs again at
-  once. What they had survives a Home Assistant restart during the run. If they change
-  the head during the run, MXZ stands down (below) and forgets their earlier setting.
-  A run MXZ started from `off` or from another mode runs at the clear line and still
-  hands back with the head off.
+  the head back in their mode, at their latest setpoint (a setpoint they change during
+  the run counts, below), when the run ends: the room clears, its sensor or head is
+  lost, or the run stalls. The room is theirs again at once. Their latest setpoint
+  survives a Home Assistant restart during the run. If they change the head's mode
+  during the run, MXZ stands down (below) and forgets their earlier setting. A run MXZ
+  started from `off` or from another mode runs at the clear line and still hands back
+  with the head off.
 - **If the head refuses the hand-back**, MXZ tries once more at the next update, but
   only while the room is still theirs and the head still shows MXZ's command; a change
   anyone made to the head since cancels it. That one retry is dropped, with no notice,
@@ -889,11 +890,24 @@ What it does:
   changing the head's mode during a run hands it to that person at once: MXZ stands
   down until the room reaches the clear line or 4 hours pass, then the floor is armed
   again, so someone who keeps turning the head off in a freezing room is overridden
-  again every 4 hours. Changing only the setpoint is not handing it over: on either
-  kind of room MXZ writes its run's setpoint back at the next update (the clear
-  line's, or the warmer one it kept from before the run), until the run ends. That
-  includes a raise: a person heating at 70 °F who turns the head up to 74 °F during
-  the run gets 70 °F back at the next update, and 70 °F when the run ends.
+  again every 4 hours. Changing only the setpoint is not handing it over. On a room
+  whose person was already running it that way when it tripped (above), the new
+  setpoint becomes their setting: MXZ runs the head at the higher of it and the clear
+  line's, as at the trip, and gives it back when the run ends. A person heating at
+  70 °F who turns the head up to 74 °F during the run keeps 74 °F, and gets 74 °F
+  back at the end; one who turns it down to 55 °F gets the clear line's 59 °F at the
+  next update, and 55 °F back at the end. For a ceiling it is the mirror: a lower
+  cool setpoint stays, a higher one is held at the clear line's and given back at the
+  end. On a held-off room, or a run MXZ started from `off` or another mode, MXZ writes
+  the run's setpoint (the clear line's) back at the next update, until the run ends.
+  MXZ does not take its own commands for a person's: while a command of its own to
+  the head is in flight, nothing the head shows counts; after it, neither does the
+  head showing that command (read on the head's own setpoint steps) or a late report
+  of what it showed before it. After a Home Assistant restart nothing the head shows
+  counts until MXZ's first update of the restored run. So these are not taken as the
+  person's setting: a setpoint changed while Home Assistant is down, one set to
+  exactly the run's own setpoint, and one set to exactly what the head showed just
+  before MXZ last changed it.
 - **Standby hold and Coordinator.** It still runs under an `eco` standby hold, the
   default for a load-shed, so a held-off or own-remote head can start during one. It
   never runs under an `off` or `fan_only` hold. With Coordinator off it sends nothing;
@@ -1275,9 +1289,10 @@ a lost or stale sensor, gives up after 2 hours of running without progress, and 
 touches anything but that room's own head. Each of those sends a notice through
 **Notify on drift**, or, with none set, a Home Assistant notification; at most one an
 hour per room. During a run, changing only the head's setpoint does not stop it: MXZ
-puts its run's setpoint back at the next update, even over a raise. If someone was
-already heating a room run from its own remote, MXZ keeps their setpoint when it is
-warmer than the clear line's and gives them their own heat back at the end; a
+puts its run's setpoint back at the next update. If someone was already heating a
+room run from its own remote, MXZ keeps their setpoint when it is warmer than the
+clear line's, follows a setpoint they change during the run (a raise to 74 °F stays
+at 74 °F), and gives them their own heat back at their latest setpoint at the end; a
 hand-back that lands during an `eco` standby hold is dropped, the head is turned off,
 and their heat does not come back when the hold ends. See
 [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling).

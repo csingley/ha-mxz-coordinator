@@ -57,7 +57,9 @@ an install with no floor set, `mode_by_floor` is always false and every room's
 A room's enable switch keeps a floor run (and a hands-off room's stand-down after a
 person's change, and the mode and setpoints of a person's own run that the floor took
 over, `floor_prior`) in its restore data, beside `hands_off_released`, only while one
-exists. The run's record (`floor_run`) includes `window`: the readings from the last
+exists. `floor_prior` holds the person's latest setpoints: one they change during the
+run replaces the ones read at the trip. Its shape is unchanged, so a record written by
+an earlier 3.7.0 build restores as before. The run's record (`floor_run`) includes `window`: the readings from the last
 hour of driving (the run's own driving time, not time on the clock) that a stalled
 run's re-arm line is measured from, as
 `[driven seconds, reading]` pairs. A record written by an earlier 3.7.0 build, with no
