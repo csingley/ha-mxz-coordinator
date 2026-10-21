@@ -203,13 +203,18 @@ class ZoneEnableRestoreData(ExtraStoredData):
     its off had landed — so after a restart the head is still left alone
     rather than parked again. Absent (an older store) or anything but True is
     not released, and that room parks, as a newly disabled room does.
+
+    ``floor``: a disabled room's floor run and/or hands-off yield, as
+    :meth:`MXZCoordinator.floor_record` gives it. Stored only while one
+    exists, so a room with no floor stores exactly what it stored before.
     """
 
     hands_off_released: bool = False
+    floor: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize for the restore store."""
-        return {"hands_off_released": self.hands_off_released}
+        return {"hands_off_released": self.hands_off_released, **(self.floor or {})}
 
 
 class MXZZoneEnableSwitch(MXZBaseSwitch):
@@ -227,26 +232,33 @@ class MXZZoneEnableSwitch(MXZBaseSwitch):
         self._attr_translation_placeholders = {"zone": zone.name}
 
     async def async_added_to_hass(self) -> None:
-        """Restore the state, then a hands-off room's landed park.
+        """Restore the state, then a hands-off room's landed park and a
+        disabled room's floor run.
 
-        Only for a room still opted in and restored disabled from THIS entry
-        (#7): anything else parks, as a newly disabled room does.
+        Only for a room restored disabled from THIS entry (#7), still opted in
+        (hands-off) or still setting that floor: anything else parks, as a
+        newly disabled room does, and its floor decides afresh.
         """
         await super().async_added_to_hass()
-        if self._attr_is_on or not self._zone.hands_off:
+        floor = self._zone.floor_low is not None or self._zone.floor_high is not None
+        if self._attr_is_on or not (self._zone.hands_off or floor):
             return
         last = await self.async_get_last_state()
         if last is None or self._restored_state_is_stale(last) or last.state != "off":
             return
         extra = await self.async_get_last_extra_data()
-        if extra is not None and extra.as_dict().get("hands_off_released") is True:
+        data = extra.as_dict() if extra is not None else {}
+        if self._zone.hands_off and data.get("hands_off_released") is True:
             self.coordinator.restore_hands_off(self._zone.slug)
+        if floor:
+            self.coordinator.restore_floor(self._zone.slug, data)
 
     @property
     def extra_restore_state_data(self) -> ZoneEnableRestoreData:
         """Read live at every restore dump, so it needs no state write."""
         return ZoneEnableRestoreData(
-            self.coordinator.hands_off_released(self._zone.slug)
+            self.coordinator.hands_off_released(self._zone.slug),
+            self.coordinator.floor_record(self._zone.slug) or None,
         )
 
     def _seed(self, *, restored: bool = False) -> None:

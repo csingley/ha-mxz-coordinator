@@ -68,6 +68,8 @@ from .const import (
     EVIDENCE_BASES,
     EVIDENCE_SAMPLE_TIMESTAMP,
     FAN_LADDER,
+    FLOOR_RANGE_C,
+    FLOOR_RANGE_F,
     IDLE_ACTION_OPTIONS,
     INHIBIT_ACTION_OPTIONS,
     MAX_ZONES,
@@ -77,6 +79,8 @@ from .const import (
     ZONE_CLIMATE,
     ZONE_ENTITY_SUFFIXES,
     ZONE_EVIDENCE_BASIS,
+    ZONE_FLOOR_HIGH,
+    ZONE_FLOOR_LOW,
     ZONE_HANDS_OFF,
     ZONE_MAX_AGE,
     ZONE_NAME,
@@ -570,6 +574,10 @@ _FRESHNESS_ZONE_FIELDS = (
     ("sample_sequence_attribute", ZONE_SAMPLE_SEQUENCE_ATTR),
 )
 _FRESHNESS_SECTION = "freshness"
+# The room page's optional freeze floor / overheat ceiling (flow key, zone key),
+# in a collapsed section. Blank by default; a blank field stores no key.
+_FLOOR_FIELDS = (("floor_low", ZONE_FLOOR_LOW), ("floor_high", ZONE_FLOOR_HIGH))
+_FLOOR_SECTION = "floor"
 
 # Configure and setup pages: (top-level fields, {section: fields}), in display
 # order. Every tunable sits on exactly one page, and each validated pair sits
@@ -634,7 +642,9 @@ def _flow_only_keys() -> frozenset[str]:
     zones list too, and a stale flat copy — still present in some old entries —
     would shadow it in the coordinator's {**data, **options} merge.
     """
-    room_keys = {key for key, _ in _ROOM_WIRING_FIELDS + _FRESHNESS_ZONE_FIELDS}
+    room_keys = {
+        key for key, _ in _ROOM_WIRING_FIELDS + _FRESHNESS_ZONE_FIELDS + _FLOOR_FIELDS
+    }
     room_keys.add(_HANDS_OFF_FIELD)
     section_keys = {key for _, groups in _PAGES.values() for key in groups}
     slot_keys = {
@@ -642,7 +652,9 @@ def _flow_only_keys() -> frozenset[str]:
         for index in range(MAX_ZONES)
         for key in room_keys
     }
-    return frozenset(room_keys | section_keys | slot_keys | {_FRESHNESS_SECTION})
+    return frozenset(
+        room_keys | section_keys | slot_keys | {_FRESHNESS_SECTION, _FLOOR_SECTION}
+    )
 
 
 _FLOW_ONLY_KEYS = _flow_only_keys()
@@ -731,15 +743,57 @@ def _room_view(zone: dict[str, Any]) -> dict[str, Any]:
     view = {key: zone.get(zone_key) for key, zone_key in _ROOM_WIRING_FIELDS}
     view[_HANDS_OFF_FIELD] = zone.get(ZONE_HANDS_OFF) is True
     view.update(_zone_freshness_profile(zone))
+    view.update({key: zone.get(zone_key) for key, zone_key in _FLOOR_FIELDS})
     return view
 
 
-def _room_schema(view: dict[str, Any], expanded: bool = False) -> vol.Schema:
-    """The room page: wiring at the top, the freshness profile in a section.
+def _floor_range(temperature_unit: str) -> tuple[float, float, float, float]:
+    """(low min, low max, high min, high max) the room page accepts."""
+    return FLOOR_RANGE_C if temperature_unit == UnitOfTemperature.CELSIUS else FLOOR_RANGE_F
+
+
+def _floor_error(values: dict[str, Any], temperature_unit: str) -> bool:
+    """Whether a submitted floor or ceiling is outside the accepted range.
+
+    Blank is fine (no floor). Anything else must be a finite number in range;
+    it is rejected, never clamped.
+    """
+    low_min, low_max, high_min, high_max = _floor_range(temperature_unit)
+    for key, lowest, highest in (
+        ("floor_low", low_min, low_max), ("floor_high", high_min, high_max),
+    ):
+        raw = values.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return True
+        if not math.isfinite(value) or not lowest <= value <= highest:
+            return True
+    return False
+
+
+def _room_schema(
+    view: dict[str, Any],
+    expanded: bool = False,
+    temperature_unit: str = UnitOfTemperature.FAHRENHEIT,
+    floor_expanded: bool = False,
+) -> vol.Schema:
+    """The room page: wiring at the top, the freshness profile and the
+    freeze floor / overheat ceiling in sections.
 
     Suggested values show what is wired now, and an untouched field is
     submitted back with its value, so only an explicit clear removes wiring.
+    The floor fields suggest only a value already stored: blank stays blank,
+    so saving a room page for anything else never sets a floor.
     """
+    floor = {
+        vol.Optional(key, description={"suggested_value": view.get(key)}): _num(
+            temperature_unit
+        )
+        for key, _ in _FLOOR_FIELDS
+    }
     freshness: dict[Any, Any] = {}
     for key, _ in _FRESHNESS_ZONE_FIELDS:
         if key == "evidence_basis":
@@ -785,6 +839,9 @@ def _room_schema(view: dict[str, Any], expanded: bool = False) -> vol.Schema:
             ): selector.BooleanSelector(),
             vol.Required(_FRESHNESS_SECTION): section(
                 vol.Schema(freshness), {"collapsed": not expanded}
+            ),
+            vol.Required(_FLOOR_SECTION): section(
+                vol.Schema(floor), {"collapsed": not floor_expanded}
             ),
         }
     )
@@ -2288,11 +2345,12 @@ class MXZOptionsFlow(OptionsFlow):
             # Reconfigure removed this room while its page was open.
             return await self.async_step_rooms()
         zone = zones[index]
+        unit = str(self.hass.config.units.temperature_unit)
         title = {"room": _room_name(zone, index)}
         if user_input is None:
             return self.async_show_form(
                 step_id="room",
-                data_schema=_room_schema(_room_view(zone)),
+                data_schema=_room_schema(_room_view(zone), temperature_unit=unit),
                 description_placeholders=title,
             )
         values = _flatten(user_input)
@@ -2302,8 +2360,17 @@ class MXZOptionsFlow(OptionsFlow):
         if _freshness_error(profile):
             return self.async_show_form(
                 step_id="room",
-                data_schema=_room_schema(values, expanded=True),
+                data_schema=_room_schema(values, expanded=True, temperature_unit=unit),
                 errors={"base": "freshness_profile_invalid"},
+                description_placeholders=title,
+            )
+        if _floor_error(values, unit):
+            return self.async_show_form(
+                step_id="room",
+                data_schema=_room_schema(
+                    values, temperature_unit=unit, floor_expanded=True
+                ),
+                errors={"base": "floor_out_of_range"},
                 description_placeholders=title,
             )
         # Every field is rendered and a pre-filled field the user leaves
@@ -2334,6 +2401,12 @@ class MXZOptionsFlow(OptionsFlow):
                 zone.pop(zone_key, None)
             else:
                 zone[zone_key] = value
+        # A blank floor field stores no key (no floor); clearing one removes it.
+        for key, zone_key in _FLOOR_FIELDS:
+            if values.get(key) in (None, ""):
+                zone.pop(zone_key, None)
+            else:
+                zone[zone_key] = float(values[key])
         return self._save({}, zones)
 
     def _save(

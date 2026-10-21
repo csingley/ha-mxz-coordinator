@@ -28,6 +28,7 @@ _ATTRS = (
     "standoff",
     "mode_by_hands_off",
     "mode_by_safety",
+    "mode_by_floor",
     "sensors_ok",
     "seconds_since_mode_change",
     "mode_change_allowed",

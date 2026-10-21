@@ -84,6 +84,27 @@ ZONE_HANDS_OFF = "hands_off"
 ZONE_SAFETY_PRIORITY_ENTITY = "safety_priority_entity"
 ZONE_SAMPLE_TIMESTAMP_ATTR = "sample_timestamp_attribute"
 ZONE_SAMPLE_SEQUENCE_ATTR = "sample_sequence_attribute"
+# Optional per-room freeze floor / overheat ceiling, in the system unit, acting
+# only while the room is disabled. Absent = none: every entry stored before
+# these keys existed has no floor, and a blank field stores no key.
+ZONE_FLOOR_LOW = "floor_low"
+ZONE_FLOOR_HIGH = "floor_high"
+# The values the room page accepts, per unit system: (low min, low max, high
+# min, high max). A floor outside these is rejected, never clamped.
+FLOOR_RANGE_F = (35.0, 65.0, 75.0, 100.0)
+FLOOR_RANGE_C = (2.0, 18.0, 24.0, 38.0)
+# The no-progress cap (decision 11): this long actually driving the head
+# without one step of new best reading ends the run as `blind`.
+FLOOR_STALL_SECONDS = 2 * 3600
+# A stalled run re-arms one step past its worst reading in this much of the
+# driving before the stall (P9), not since its last gain: a dip earlier in
+# the window cannot push the re-arm line far past the stall.
+FLOOR_REARM_SECONDS = 3600
+# A hands-off room that yielded a run to a person re-arms after this long
+# (or once the room reaches the clear line).
+FLOOR_YIELD_SECONDS = 4 * 3600
+# At most one floor notice per room in this long, whatever the kind (P5).
+FLOOR_NOTICE_SECONDS = 3600
 EVIDENCE_UNKNOWN = "unknown"
 EVIDENCE_HA_WRITE = "ha_state_write"
 EVIDENCE_SAMPLE_TIMESTAMP = "sample_timestamp"

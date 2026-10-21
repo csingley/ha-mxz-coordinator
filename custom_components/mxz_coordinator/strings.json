@@ -12,7 +12,7 @@
         "data_description": {
           "heads": "Order is priority.",
           "entry_title": "Shown on the integration card.",
-          "notify_service": "Optional. Who to tell when MXZ puts a head back on its mode."
+          "notify_service": "Optional. Who to tell when MXZ puts a head back on its mode, and when a room's freeze floor or overheat ceiling trips, cannot protect the room, or has a command rejected. With none set, or one Home Assistant does not have, floor notices appear in Home Assistant's notifications."
         }
       },
       "rooms": {
@@ -203,7 +203,7 @@
         "data_description": {
           "heads": "Order is priority.",
           "entry_title": "Shown on the integration card.",
-          "notify_service": "Optional. Who to tell when MXZ puts a head back on its mode."
+          "notify_service": "Optional. Who to tell when MXZ puts a head back on its mode, and when a room's freeze floor or overheat ceiling trips, cannot protect the room, or has a command rejected. With none set, or one Home Assistant does not have, floor notices appear in Home Assistant's notifications."
         }
       },
       "reconfigure_rooms": {
@@ -302,7 +302,8 @@
       "lockout_inverted": "\"Heat anyway below\" can't be above \"Cool anyway above\".",
       "must_not_be_negative": "Enter 0 or more.",
       "not_a_number": "Enter a number.",
-      "freshness_profile_invalid": "These freshness settings don't fit together. Times must be finite positive minutes, and maximum age can't be shorter than the report interval. \"Sensor reports a sample time or counter\" needs exactly one attribute; other choices need both attributes empty. Nothing was saved."
+      "freshness_profile_invalid": "These freshness settings don't fit together. Times must be finite positive minutes, and maximum age can't be shorter than the report interval. \"Sensor reports a sample time or counter\" needs exactly one attribute; other choices need both attributes empty. Nothing was saved.",
+      "floor_out_of_range": "The freeze floor must be 35-65 °F (2-18 °C) and the overheat ceiling 75-100 °F (24-38 °C), in your Home Assistant unit. Leave a field empty for none. Nothing was saved."
     },
     "abort": {
       "empty_options": "Nothing changed."
@@ -486,6 +487,18 @@
               "max_age": "Leave empty to use three report intervals.",
               "startup_grace": "Leave empty to use the maximum age.",
               "sample_timestamp_attribute": "Only for \"Sensor reports a sample time or counter\". Fill this or the counter, not both."
+            }
+          },
+          "floor": {
+            "name": "Freeze floor and overheat ceiling",
+            "description": "Optional, off by default: leave both empty for none. Acts only while this room is disabled, and can turn its head on: MXZ heats the room when it falls below the floor and cools it above the ceiling, then turns the head off again. A standby hold that parks the heads (off or fan only) or Coordinator off stops it. With a lost or stuck sensor there is no protection. 50 °F (10 °C) is a typical freeze floor.",
+            "data": {
+              "floor_low": "Freeze floor",
+              "floor_high": "Overheat ceiling"
+            },
+            "data_description": {
+              "floor_low": "Heat this disabled room below this temperature. 35-65 °F (2-18 °C).",
+              "floor_high": "Cool this disabled room above this temperature. 75-100 °F (24-38 °C)."
             }
           }
         }

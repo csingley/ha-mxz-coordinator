@@ -27,6 +27,65 @@ install with no room's safety priority wired it is always false.
 
 See [Safety priority](../README.md#safety-priority).
 
+## Freeze floor and overheat ceiling (3.7.0)
+
+Two per-room settings, **Freeze floor** and **Overheat ceiling**, in Configure → Rooms
+→ (room) → **Freeze floor and overheat ceiling**: optional numbers in the Home
+Assistant temperature unit. Stored as `floor_low` and `floor_high` (numbers) in that
+room's record in the entry's `zones` list, only when set; an empty field stores no
+key, and clearing one removes it. Saving a room page without touching them stores
+nothing.
+
+**Existing entries are unchanged.** No config-entry version change, no migration: a
+room with neither key has no floor, which is every room of every entry saved before
+these settings existed, and it behaves exactly as before. A stored value that is not
+a finite number is treated as no floor. The values are not converted if you later
+change Home Assistant's unit system; re-enter them in the new unit.
+
+While a room is disabled, a tripped floor heats it and a tripped ceiling cools it, to
+3 °F (1.5 °C) back inside, then the head goes off. A tripped freeze floor's heat beats
+every other want in any room order, a Safety priority room's cool included. A tripped
+ceiling's cool against a Safety priority room's heat goes by room order.
+
+The plan sensor gains a top-level `mode_by_floor` attribute, and each room in its
+`zones` list gains `floor_low`, `floor_high`, `floor_want`, `floor_state` and
+`floor_reason`; a room run from its own remote can read `floor` in `hands_off`.
+`mode_by_safety` is also true while a tripped floor's direction is the shared mode. On
+an install with no floor set, `mode_by_floor` is always false and every room's
+`floor_state` is `none`.
+
+A room's enable switch keeps a floor run (and a hands-off room's stand-down after a
+person's change, and the mode and setpoints of a person's own run that the floor took
+over, `floor_prior`) in its restore data, beside `hands_off_released`, only while one
+exists. `floor_prior` holds the person's latest setpoints: one they change during the
+run replaces the ones read at the trip. Its shape is unchanged, so a record written by
+an earlier 3.7.0 build restores as before. The run's record (`floor_run`) includes `window`: the readings from the last
+hour of driving (the run's own driving time, not time on the clock) that a stalled
+run's re-arm line is measured from, as
+`[driven seconds, reading]` pairs. A record written by an earlier 3.7.0 build, with no
+`window` (or one that cannot be read), is still restored; its window starts again
+from the next reading. A room with no floor stores exactly what it stored before
+these settings existed.
+
+Floor notices go to **Notify on drift**. With no notification service set, or one
+Home Assistant does not have (the call raises `ServiceNotFound`), they are Home
+Assistant notifications (`persistent_notification.create`) with the id
+`mxz_coordinator_<entry id>_floor_<room key>_<kind>`, where the room key is, for
+example, `secondary` and `<kind>` is `trip`, `blind`, `stalled`, `rejected` or
+`handback` (a head that refused to be handed back to its person twice), so a repeat
+replaces the last. The drift notice itself still goes only to the configured service.
+At most one floor notice goes out per room per hour; one held back is logged as a
+warning and sent after the hour if it is still true then. Nothing about notices, and
+no pending hand-back retry, is stored, so a restart starts the hour afresh, and a
+room still stalled or blind notifies once more; that is intended. Losing a held-back
+notice (a held-back trip notice included) or a pending hand-back retry at a restart is
+a known limitation of 3.7.0, which I accepted for this release; a fix is planned
+after 3.7.0. A run restored after a restart is not a new trip, so a trip notice held
+back before the restart is never sent, although the plan sensor shows the run
+throughout.
+
+See [Freeze floor and overheat ceiling](../README.md#freeze-floor-and-overheat-ceiling).
+
 ## Run one room from its own remote (3.6.0)
 
 A per-room setting, **Let its own remote run it while disabled**, in Configure →

@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, STATE_ON, UnitOfTemperature
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceNotFound
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_component import DATA_INSTANCES
 from homeassistant.helpers.event import (
@@ -95,6 +95,9 @@ from .const import (
     EVIDENCE_HA_WRITE,
     FAN_AUTO,
     FAN_LADDER,
+    FLOOR_NOTICE_SECONDS,
+    FLOOR_STALL_SECONDS,
+    FLOOR_YIELD_SECONDS,
     HEALTH_AWAITING,
     HEALTH_ELIGIBLE,
     HEALTH_HEALTHY,
@@ -123,6 +126,8 @@ from .const import (
     VANE_KICK_SPINUP,
     ZONE_CLIMATE,
     ZONE_EVIDENCE_BASIS,
+    ZONE_FLOOR_HIGH,
+    ZONE_FLOOR_LOW,
     ZONE_HANDS_OFF,
     ZONE_MAX_AGE,
     ZONE_NAME,
@@ -140,13 +145,17 @@ from .const import (
 )
 from .logic import (
     PRIORITY_DEMAND,
+    PRIORITY_FLOOR_HEAT,
     PRIORITY_SAFETY,
     PRIORITY_VOTE,
     Demand,
+    FloorRun,
     arbitrate,
     engage_with_latch,
     evidence_contract,
     fan_for_delta,
+    floor_call,
+    floor_progress,
     freshness_window,
     head_action,
     room_call,
@@ -288,6 +297,11 @@ class Zone:
     evidence_basis: Any = None
     sample_timestamp_attribute: Any = None
     sample_sequence_attribute: Any = None
+    # Optional freeze floor / overheat ceiling (ZONE_FLOOR_LOW/HIGH), system
+    # unit, acting only while the room is disabled. None = not configured; a
+    # stored value that is not a finite number is none too.
+    floor_low: float | None = None
+    floor_high: float | None = None
 
 
 def _parse_zones(conf: dict[str, Any], target_default: float) -> list[Zone]:
@@ -337,6 +351,8 @@ def _parse_zones(conf: dict[str, Any], target_default: float) -> list[Zone]:
             evidence_basis=z.get(ZONE_EVIDENCE_BASIS),
             sample_timestamp_attribute=z.get(ZONE_SAMPLE_TIMESTAMP_ATTR),
             sample_sequence_attribute=z.get(ZONE_SAMPLE_SEQUENCE_ATTR),
+            floor_low=_finite(z.get(ZONE_FLOOR_LOW)),
+            floor_high=_finite(z.get(ZONE_FLOOR_HIGH)),
         )
         for i, z in enumerate(raw)
     ]
@@ -528,6 +544,51 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # from it while no coordinated room calls is undoing the vote, not a
         # flip of ours, so that starts no dwell either (see _compute).
         self._mode_by_votes = False
+        # Freeze floor / overheat ceiling, for a disabled room that sets one.
+        # Per room: the tripped run's progress record; whether the last compute
+        # found MXZ driving its head in the floor's direction (the no-progress
+        # clock runs only then) and when that compute ran; a hands-off room's
+        # yield to a person (direction, time); and what the plan shows.
+        self._floor_runs: dict[str, FloorRun] = {}
+        self._floor_driving: dict[str, bool] = {}
+        self._floor_eval_ts: dict[str, float] = {}
+        self._floor_yield: dict[str, tuple[str, float]] = {}
+        self._floor_view: dict[str, tuple[str, str | None]] = {}
+        # A hands-off run MXZ took over from a person already running the
+        # head in the floor's direction: their (mode, low, high), given back
+        # when the run ends (P3); a hand-back for the next apply to send, as
+        # (theirs, which try, the head as MXZ left it: None on the first try);
+        # one in flight, as (theirs, which try, the head as MXZ left it, its
+        # delivery); and a refused one's notice, kept while the head still
+        # shows MXZ's command, as (message, that head). While MXZ runs a head
+        # over a person's own run: the setpoints it last queued for it, as the
+        # head should show them, and what the head showed then (P15).
+        self._floor_prior: dict[str, tuple[str, float, float]] = {}
+        self._floor_expect: dict[str, tuple[tuple[float, float], tuple | None]] = {}
+        self._floor_handback: dict[str, tuple[tuple[str, float, float], int, tuple | None]] = {}
+        self._floor_handing_back: dict[
+            str, tuple[tuple[str, float, float], int, tuple, dict[str, Any]]
+        ] = {}
+        self._floor_handback_note: dict[str, tuple[str, tuple]] = {}
+        # One notice per episode: a blind room, a rejected floor command.
+        self._floor_blind_noticed: set[str] = set()
+        self._floor_reject_noticed: set[str] = set()
+        # The rate limit (P5): when each room's last floor notice went out,
+        # and the notices held back since (each logged once). In memory only.
+        self._floor_notice_at: dict[str, float] = {}
+        self._floor_held_back: dict[str, set[str]] = {}
+        # A trip notice the limit held back, sent once the hour is up if its
+        # run is still going then (P8).
+        self._floor_trip_held: dict[str, str] = {}
+        # A head that rejected MXZ's floor command and has accepted none
+        # since: its error. The plan then shows held, not heat/cool.
+        self._floor_rejecting: dict[str, str] = {}
+        # The clear line's margin is a constant, the unit's default demand
+        # threshold; a step is the unit's setpoint step (1 °F / 0.5 °C).
+        self._floor_margin: float = float(_defaults[CONF_DEMAND_THRESHOLD])
+        # Inert until async_setup: the seed compute below runs before the
+        # switches restore, with every room still reading disabled.
+        self._floor_live = False
 
         # Vane-kick bookkeeping: heads mid-kick are skipped by _apply so the
         # plan doesn't turn them back off while the louvre is still traveling.
@@ -733,6 +794,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # -- lifecycle ----------------------------------------------------------
     async def async_setup(self) -> None:
         """Wire up listeners and run the first compute/apply."""
+        self._floor_live = True  # the switches have restored by now
         self._unsubs.append(
             async_track_state_change_event(
                 self.hass,
@@ -889,6 +951,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ages: list[float | None] = []
         votes: list[str | None] = []
         arb_demands: list[Demand] = []
+        floors: list[str | None] = []
         all_ok = True
         coasted = False
         for i, zone in enumerate(self.zones):
@@ -958,12 +1021,19 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # _sync_coast_timer). A disabled room (MODE_OFF) is not coasting.
             if prior_engage and engage == ENGAGE_SATISFIED:
                 coasted = True
+            # A tripped floor is this disabled room's engage (the latch stays
+            # untouched: it belongs to the room's own enabled runs).
+            floor = self._floor_want(zone, temp, ok, now)
+            if floor is not None:
+                engage = floor
             vote = self._hands_off_vote(zone)
             arb_demands.extend(
                 self._zone_arbitration_pair(
                     demand=demand, vote=vote, safety=self._zone_safety(zone), index=i,
+                    floor=floor,
                 )
             )
+            floors.append(floor)
             demands.append(demand)
             engages.append(engage)
             votes.append(vote)
@@ -998,7 +1068,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and not any(c in (MODE_COOL, MODE_HEAT) for c in (*demands, *engages))
         ):
             by_votes = True
-        calls = [*demands, *votes]
+        self._floor_settle(floors, state)
+        calls = [*demands, *votes, *floors]
         plan.update(
             {
                 "state": state,
@@ -1018,15 +1089,20 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "hands_off": self._hands_off_phase(zone),
                         "hands_off_vote": votes[i],
                         "safety_priority": self._zone_safety(zone),
+                        "floor_low": zone.floor_low,
+                        "floor_high": zone.floor_high,
+                        **self._floor_attributes(zone),
+                        "floor_want": floors[i],
                         **self.command_attributes(zone.climate_id),
                     }
                     for i, zone in enumerate(self.zones)
                 ],
                 # Both directions physically asked of the one outdoor unit,
-                # a hands-off head's included.
+                # a hands-off head's and a floor's included.
                 "standoff": MODE_COOL in calls and MODE_HEAT in calls,
                 "mode_by_hands_off": by_votes,
                 "mode_by_safety": grant.by_safety,
+                "mode_by_floor": state in floors,
                 "sensors_ok": all_ok,
                 "seconds_since_mode_change": int(elapsed),
                 "mode_change_allowed": allowed,
@@ -1558,6 +1634,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     vote=view.get("hands_off_vote"),
                     safety=bool(view.get("safety_priority")),
                     index=i,
+                    floor=view.get("floor_want"),
                 )
             )
         would_flip_to = arbitrate(
@@ -1657,6 +1734,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         was computed; the writeback at the end skips itself if a person has
         asked for a direction since.
         """
+        # A hand-back (P3) is for this apply only: one skipped (Coordinator
+        # off, a standby park, no plan yet) leaves the head as MXZ left it.
+        handbacks, self._floor_handback = self._floor_handback, {}
         if self._retired:
             return
         if not self.coordinator_enable:
@@ -1681,14 +1761,43 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if any(engage not in valid_eng for engage in engages):
             return
 
+        floors = [view.get("floor_want") for view in plan.get("zones", ())]
         tasks = []
-        for zone, engage in zip(self.zones, engages):
+        for zone, engage, floor in zip(self.zones, engages, floors):
             if zone.climate_id in self._vane_kicks:
                 continue  # mid vane-kick: leave the head alone until it finishes
-            if self._hands_off_phase(zone) is not None and not self.inhibited:
+            if (
+                self._hands_off_phase(zone) in ("parking", "released")
+                and not self.inhibited
+            ):
+                # (A floor run skips all of this: the head is MXZ's for the run.)
                 # (Any standby hold, eco included, holds it off like any
                 # disabled room: the fixed parks never reach here.)
                 if zone.slug in self._hands_off_released:
+                    head = self.hass.states.get(zone.climate_id)
+                    back = handbacks.get(zone.slug)
+                    if back is not None and head is not None and (
+                        head.state not in UNAVAILABLE_STATES
+                    ):
+                        # A floor run ended on a head a person was already
+                        # running that way: theirs again, as they had it (P3).
+                        # A retry goes only over MXZ's own command, never
+                        # over a change made since.
+                        theirs, attempt, left = back
+                        seen = _head_setting(head)
+                        if left is None or seen == left:
+                            task = self._queue_delivery(zone.climate_id, *theirs)
+                            if task is not None:
+                                tasks.append(task)
+                                # A delivery superseded before it reaches the
+                                # head ends with neither accepted nor rejected,
+                                # so this entry stays until the next hand-back
+                                # overwrites it. Harmless: it is matched only
+                                # by its delivery's identity, never acted on.
+                                self._floor_handing_back[zone.slug] = (
+                                    theirs, attempt, seen,
+                                    self._deliveries[zone.climate_id],
+                                )
                     continue  # its off landed: the head is someone else's now
                 head = self.hass.states.get(zone.climate_id)
                 if (
@@ -1704,16 +1813,25 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # Do not manufacture the missing startup mode with our own
                     # park/write. A known head still follows sensor-failure parking.
                     continue
+            idle = self._idle_act_for(zone.climate_id)
+            if not zone.enable:
+                # A disabled room never idles in fan_only: a floor waiting out
+                # the mode is held off. (Without a floor, engage is off and
+                # decides first.)
+                idle = MODE_OFF
             act = head_action(
                 engage=engage,
                 mode=state,
                 eco=self._eco_active(),
-                idle=self._idle_act_for(zone.climate_id),
+                idle=idle,
             )
             low, high = setpoints(
                 mode=state,
-                target=float(zone.target),
-                eco=self._eco_active(),
+                # A floor runs the head to its clear line, never the eco band.
+                target=(
+                    self._floor_clear(zone, floor) if floor else float(zone.target)
+                ),
+                eco=self._eco_active() and not floor,
                 clamp_min=self.clamp_min,
                 clamp_max=self.clamp_max,
                 band=self.setpoint_band,
@@ -1721,11 +1839,26 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 eco_cool=self.eco_cool,
                 eco_heat=self.eco_heat,
             )
+            taken = self._floor_prior.get(zone.slug) if floor == state else None
+            if taken is not None:
+                # A run taken over from a person's own heat keeps their
+                # setpoints where those are warmer than the clear line's
+                # (cooler, for a ceiling over their cool) (P10): their latest,
+                # if they changed them during the run (P15).
+                keep = max if floor == MODE_HEAT else min
+                low, high = keep(low, taken[1]), keep(high, taken[2])
             shown = plan[f"{zone.slug}_temp"]
             delta = 0.0 if shown is None else abs(shown - float(zone.target))
-            task = self._queue_delivery(zone.climate_id, act, low, high, delta, engage)
+            # A floor delivery takes the fan-free path (engage None, as the
+            # standby park does): mode and setpoint only, so a manual fan pick
+            # is kept and MXZ never writes this head's fan.
+            task = self._queue_delivery(
+                zone.climate_id, act, low, high, delta, None if floor else engage
+            )
             if task is not None:
                 tasks.append(task)
+                if taken is not None:
+                    self._floor_expect_command(zone, state, low, high)
         await self._wait_deliveries(tasks)
 
         # Stamp the flip only on a real mode change (cool<->heat) — and never
@@ -1835,6 +1968,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "MXZ: applying %s to %s failed (zone degraded, others continue): %s",
                 act, climate_id, err,
             )
+            self._floor_rejected(climate_id, err, active)
         except Exception as err:
             # Unexpected dependency failures retain the existing global failure
             # and restore-channel semantics, even if this head outlives a plan.
@@ -1866,8 +2000,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         if not self._delivery_owned(active):
             return
-        if engage is None:  # fixed standby park, no fan machinery
+        if engage is None:  # fixed standby park or a floor, no fan machinery
             await self._apply_head(climate_id, act, low, high)
+            self._floor_accepted(climate_id, active)
             return
         if act in (MODE_COOL, MODE_HEAT):
             self._last_active[climate_id] = (act, dt_util.utcnow().timestamp())
@@ -1884,6 +2019,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not self._delivery_owned(active):
                 return
         await self._apply_head(climate_id, act, low, high)
+        self._floor_accepted(climate_id, active)
         if not self._delivery_owned(active):
             return
         if handback:
@@ -2024,6 +2160,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if plan:
                 for view, zone in zip(plan.get("zones", ()), self.zones):
                     view.update(self.command_attributes(zone.climate_id))
+                    view.update(self._floor_attributes(zone))
                     view["control_reasons"] = self._control_reasons(zone)
         for listener in tuple(self._delivery_listeners):
             listener()
@@ -2141,11 +2278,12 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 engage = data.get(f"{zone.slug}_engage")
                 if engage not in (MODE_COOL, MODE_HEAT, ENGAGE_SATISFIED, MODE_OFF):
                     return None
+                idle = self._idle_act_for(entity_id)
                 return head_action(
                     engage=engage,
                     mode=state,
                     eco=self._eco_active(),
-                    idle=self._idle_act_for(entity_id),
+                    idle=idle if zone.enable else MODE_OFF,  # as _apply
                 )
         return None
 
@@ -3178,6 +3316,25 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         and self._hands_off_phase(zone) == "parking"
                     ):
                         self._hands_off_released.add(zone.slug)
+        # A person changing a hands-off head during a floor run takes it back
+        # (decision 8b): a real mode change, between two available states, to
+        # anything but what MXZ is sending or would send, and not a vane kick.
+        old_mode = old_state.state if old_state else None
+        if (
+            mode != old_mode
+            and mode not in (None, *UNAVAILABLE_STATES)
+            and old_mode not in (None, *UNAVAILABLE_STATES)
+            and entity_id not in self._vane_kicks
+            and entity_id not in self._vane_kick_woken
+        ):
+            for zone in self.zones:
+                if (
+                    zone.climate_id == entity_id
+                    and self._hands_off_phase(zone) == "floor"
+                    and mode != self._planned_act_for(entity_id)
+                ):
+                    self._floor_yield_to_person(zone, dt_util.utcnow().timestamp())
+                    refresh_needed = True
         self._arm_or_cancel(
             entity_id, "band",
             mode in BANNED_MODES and not self._hands_off_head(entity_id),
@@ -3292,13 +3449,21 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     # -- hands-off rooms (opt-in) --------------------------------------------
     def _hands_off_phase(self, zone: Zone) -> str | None:
-        """None unless the room is opted in AND disabled; then parking|released."""
+        """None unless the room is opted in AND disabled; then parking|released,
+        or floor while its tripped floor has MXZ running the head."""
         if not zone.hands_off or zone.enable:
             return None
+        if self.floor_tripped(zone.slug):
+            return "floor"
         return "released" if zone.slug in self._hands_off_released else "parking"
 
     def _hands_off_head(self, climate_id: str) -> bool:
-        """True when this head belongs to a released hands-off room."""
+        """True when this head belongs to a released hands-off room.
+
+        A person's dry or auto on a floor-run head is not healed either: the
+        yield in :meth:`_on_head_change` releases the room before the band
+        check reads this.
+        """
         return any(
             zone.climate_id == climate_id and self._hands_off_phase(zone) == "released"
             for zone in self.zones
@@ -3321,15 +3486,19 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @staticmethod
     def _zone_arbitration_pair(
         *, demand: str, vote: str | None, safety: bool, index: int,
-    ) -> tuple[Demand, Demand]:
-        """One zone's (demand, vote) as a pair of :class:`Demand` entries.
+        floor: str | None = None,
+    ) -> tuple[Demand, ...]:
+        """One zone's (demand, vote[, floor]) as :class:`Demand` entries.
 
         Shared by ``_compute`` (live) and ``_sync_dwell_timer`` (replayed from
         the already-computed plan) so the priority-tier math lives in exactly
-        one place.
+        one place. A tripped floor is a third, commanding entry: a freeze
+        floor's heat at PRIORITY_FLOOR_HEAT, a ceiling's cool at
+        PRIORITY_SAFETY (see :func:`logic.arbitrate`). It is independent of
+        the room's own Safety priority sensor.
         """
         tier = PRIORITY_SAFETY if safety else None
-        return (
+        pair = (
             Demand(
                 direction=demand if demand in (MODE_COOL, MODE_HEAT) else None,
                 priority=(tier if tier is not None else PRIORITY_DEMAND, index),
@@ -3340,6 +3509,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 read_only=True,
             ),
         )
+        if floor not in (MODE_COOL, MODE_HEAT):
+            return pair
+        floor_tier = PRIORITY_FLOOR_HEAT if floor == MODE_HEAT else PRIORITY_SAFETY
+        return (*pair, Demand(direction=floor, priority=(floor_tier, index)))
 
     def _zone_safety(self, zone: Zone) -> bool:
         """Whether this zone's Demand carries PRIORITY_SAFETY this tick.
@@ -3362,6 +3535,554 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def hands_off_released(self, slug: str) -> bool:
         """Whether this room's park landed (what the enable switch persists)."""
         return slug in self._hands_off_released
+
+    # -- freeze floor / overheat ceiling (opt-in, disabled rooms) -------------
+    def floor_tripped(self, slug: str) -> bool:
+        """Whether this room's floor is tripped and wants its direction now."""
+        run = self._floor_runs.get(slug)
+        return run is not None and not run.stalled
+
+    def _floor_clear(self, zone: Zone, direction: str) -> float:
+        """The clear line of a run: the room is fine again from here."""
+        if direction == MODE_HEAT:
+            return float(zone.floor_low) + self._floor_margin
+        return float(zone.floor_high) - self._floor_margin
+
+    def _floor_want(self, zone: Zone, temp: float, ok: bool, now: float) -> str | None:
+        """Advance this room's floor by one compute; return its want, if any.
+
+        Only a disabled room with a floor or ceiling configured can have one.
+        No usable reading (invalid, missing or stale: ``ok`` is the demand
+        path's own test) or an unavailable head ends a run at once and casts
+        nothing: a floor never acts blind (decision 4). A run that MXZ has
+        driven for the cap without a step of new best reading is ``blind`` as
+        well, until the room clears or reaches a new low (decision 11). The
+        clock is charged only for time the LAST compute found the head being
+        driven (see :meth:`_floor_settle`), so a wait, a standoff loss,
+        Coordinator off or Home Assistant downtime costs nothing.
+        """
+        slug = zone.slug
+        driven_for = (
+            now - self._floor_eval_ts[slug]
+            if self._floor_driving.get(slug) and slug in self._floor_eval_ts
+            else 0.0
+        )
+        self._floor_eval_ts[slug] = now
+        self._floor_driving[slug] = False
+        configured = zone.floor_low is not None or zone.floor_high is not None
+        if not self._floor_live:
+            # The seed compute: nothing is restored yet, so nothing is decided.
+            self._floor_view[slug] = ("armed" if configured else "none", None)
+            return None
+        self._floor_flush_handback(zone, self.hass.states.get(zone.climate_id))
+        if not configured or zone.enable:
+            self._floor_end(slug)
+            self._floor_yield.pop(slug, None)
+            self._floor_blind_noticed.discard(slug)
+            self._floor_view[slug] = ("enabled" if configured else "none", None)
+            return None
+        head = self.hass.states.get(zone.climate_id)
+        # Before anything ends the run: the end gives back their latest.
+        self._floor_follow_person(zone, head)
+        if not ok:
+            self._floor_end(slug, hand_back=True)
+            self._floor_blind(
+                zone, "Room sensor unavailable, invalid or stale: no floor "
+                "protection until it reports a usable reading."
+            )
+            return None
+        if head is None or head.state in UNAVAILABLE_STATES:
+            self._floor_end(slug, hand_back=True)
+            self._floor_blind(
+                zone, f"Head {zone.climate_id} unavailable: no floor protection "
+                "until it reports again."
+            )
+            return None
+        if (yielded := self._floor_yield.get(slug)) is not None:
+            direction, since = yielded
+            cleared = floor_call(
+                temp=temp, sensor_ok=True, low=zone.floor_low, high=zone.floor_high,
+                prior=direction, margin=self._floor_margin,
+            ) != direction
+            if not cleared and now - since < FLOOR_YIELD_SECONDS:
+                self._floor_blind_noticed.discard(slug)
+                rearm = dt_util.utc_from_timestamp(since + FLOOR_YIELD_SECONDS)
+                self._floor_view[slug] = ("yielded", (
+                    "A person changed the head during a floor run, so MXZ left "
+                    "it to them. The floor re-arms when the room reaches its "
+                    f"clear line or at {rearm.isoformat(timespec='minutes')}."
+                ))
+                return None
+            self._floor_yield.pop(slug)
+        run = self._floor_runs.get(slug)
+        was_stalled = run is not None and run.stalled
+        if run is not None:
+            run = floor_progress(
+                run, temp=temp, driven_for=driven_for,
+                step=self.target_step, cap=FLOOR_STALL_SECONDS,
+            )
+        want = floor_call(
+            temp=temp, sensor_ok=True, low=zone.floor_low, high=zone.floor_high,
+            prior=run.direction if run is not None else None,
+            margin=self._floor_margin,
+        )
+        if run is not None and want != run.direction:
+            # Cleared (or crossed straight to the other trip).
+            self._floor_end(slug, hand_back=True)
+            run = None
+        if run is None:
+            if want is None:
+                self._floor_blind_noticed.discard(slug)
+                self._floor_view[slug] = ("armed", None)
+                return None
+            run = FloorRun(direction=want, mark=temp, worst=temp)
+            self._floor_notify_trip(zone, want, temp)
+        elif was_stalled and not run.stalled:
+            self._floor_notify_trip(zone, run.direction, temp)  # a new low re-armed it
+        elif not run.stalled and (held := self._floor_trip_held.get(slug)) is not None:
+            if self._floor_send(zone, "trip", held):  # the hour is up (P8)
+                del self._floor_trip_held[slug]
+        self._floor_runs[slug] = run
+        if run.stalled:
+            self._floor_hand_back(slug)
+            step = f"{self.target_step:g} {self._unit_symbol()}"
+            self._floor_blind(
+                zone, f"Stalled: {FLOOR_STALL_SECONDS // 3600} h of driving the head "
+                f"without {step} of progress. Re-arms when the room reaches its "
+                f"clear line or a new {'low' if run.direction == MODE_HEAT else 'high'}.",
+                kind="stalled",
+            )
+            return None
+        self._floor_blind_noticed.discard(slug)
+        if zone.hands_off:
+            # The run is MXZ's: the room parks again when it ends (decision 5),
+            # unless MXZ took the head over a person's own run that way (P3).
+            if slug in self._hands_off_released:
+                self._floor_take_over(zone, run.direction, head)
+            self._hands_off_released.discard(slug)
+        self._floor_view[slug] = (run.direction, None)  # settled after arbitration
+        return run.direction
+
+    def _floor_settle(self, floors: list[str | None], state: str) -> None:
+        """After arbitration: is each tripped floor driven now, or held?
+
+        Driven means the plan runs the head in the floor's direction and the
+        apply will send it: Coordinator on, no fixed standby park. Only then
+        does the no-progress clock run until the next compute.
+        """
+        active = self.coordinator_enable and not self._parked_by_standby()
+        for zone, want in zip(self.zones, floors):
+            if want is None:
+                continue
+            driving = active and want == state
+            self._floor_driving[zone.slug] = driving
+            if driving:
+                continue
+            if not self.coordinator_enable:
+                reason = "Coordinator is off: MXZ sends nothing."
+            elif self._parked_by_standby():
+                reason = "A standby hold parks every head."
+            else:
+                reason = (
+                    f"Waiting: the shared mode is {state} (the mode-change wait, or "
+                    "a higher-ranked want). The head is held off meanwhile."
+                )
+            self._floor_view[zone.slug] = ("held", reason)
+
+    def _floor_end(self, slug: str, *, hand_back: bool = False) -> None:
+        """End this room's run, if any. A hands-off room then parks
+        (decision 5), unless ``hand_back`` and the run was taken over from a
+        person: see :meth:`_floor_hand_back`. Without ``hand_back`` (the room
+        was enabled, the floor removed, a person changed the head) the
+        person's earlier run is forgotten."""
+        self._floor_runs.pop(slug, None)
+        self._floor_trip_held.pop(slug, None)
+        self._floor_reject_noticed.discard(slug)
+        self._floor_rejecting.pop(slug, None)
+        self._floor_expect.pop(slug, None)
+        if hand_back:
+            self._floor_hand_back(slug)
+        else:
+            self._floor_prior.pop(slug, None)
+
+    def _floor_take_over(self, zone: Zone, direction: str, head: Any) -> None:
+        """A hands-off run starts on a released room. If the person is
+        running the head in the floor's direction already, remember their
+        mode and setpoint to give back (P3). A head with no setpoint to read
+        gets the clear line's."""
+        if head.state != direction:
+            return  # off, another mode: decision 5 (back to off)
+        if (setting := _floor_setting(head)) is None:
+            setting = self._floor_line(zone, direction)
+        self._floor_prior[zone.slug] = (direction, *setting)
+
+    def _floor_line(self, zone: Zone, direction: str) -> tuple[float, float]:
+        """The setpoints of a run's clear line, as :meth:`_apply` computes
+        them before it keeps a person's warmer (cooler) ones."""
+        return setpoints(
+            mode=direction, target=self._floor_clear(zone, direction), eco=False,
+            clamp_min=self.clamp_min, clamp_max=self.clamp_max,
+            band=self.setpoint_band, step=self.target_step,
+        )
+
+    def _floor_as_sent(
+        self, zone: Zone, head: Any, mode: str, low: float, high: float
+    ) -> tuple[float, float]:
+        """(low, high) as the head should show them once MXZ sends them:
+        clamped to the head's band, and its one setpoint on a single-setpoint
+        head, as :meth:`_apply_head` sends them."""
+        low, high = self._clamp_to_head_band(zone.climate_id, low, high)
+        if head is not None and not (
+            int(head.attributes.get("supported_features") or 0) & 2
+        ):
+            low = high = high if mode == MODE_COOL else low
+        return (low, high)
+
+    def _floor_expect_command(
+        self, zone: Zone, mode: str, low: float, high: float
+    ) -> None:
+        """MXZ queued (low, high) for a head it runs over a person's own run:
+        remember what the head should show once it lands
+        (:meth:`_floor_as_sent`) and what it showed until then. Neither is a
+        person's change (P15). The same command to a head already showing it
+        replaces nothing, so what it showed before stays."""
+        head = self.hass.states.get(zone.climate_id)
+        low, high = self._floor_as_sent(zone, head, mode, low, high)
+        setting = None if head is None else _floor_setting(head)
+        known = self._floor_expect.get(zone.slug)
+        if known is not None and known[0] == (low, high) and (
+            self._floor_shows(zone.climate_id, setting, (low, high))
+        ):
+            return
+        self._floor_expect[zone.slug] = ((low, high), setting)
+
+    def _floor_shows(
+        self, climate_id: str, setting: tuple | None, want: tuple[float, float]
+    ) -> bool:
+        """Whether a head showing ``setting`` already holds ``want``, read on
+        its own grid as the idempotent check reads it."""
+        return setting is not None and all(
+            self._head_already_at(climate_id, seen, edge)
+            for seen, edge in zip(setting, want)
+        )
+
+    def _floor_follow_person(self, zone: Zone, head: Any) -> None:
+        """A person changed only the setpoints of a head MXZ runs over their
+        own run: that is their setting now. The run keeps it where it protects
+        more (P10), and it is what they get back at the end (P15).
+
+        It is a person's change only if the head is in the run's mode, MXZ has
+        nothing in flight to it and is not kicking its vanes, and it shows
+        neither MXZ's last command nor the run's clear line (on the head's own
+        grid, as the idempotent check reads it), nor what it showed before
+        that last command (a late report from before it landed). MXZ may have
+        sent the clear line at any point in the run, so a late report of it
+        is never theirs (P17), even after they changed it since. Until MXZ
+        has commanded the head in this run (after a restart, its first
+        apply), nothing is taken.
+        """
+        slug = zone.slug
+        prior, expect = self._floor_prior.get(slug), self._floor_expect.get(slug)
+        if (
+            prior is None or expect is None or head is None
+            or head.state != prior[0]
+            or zone.climate_id in self._deliveries
+            or zone.climate_id in self._vane_kicks
+        ):
+            return
+        sent, before = expect
+        setting = _floor_setting(head)
+        line = self._floor_as_sent(
+            zone, head, prior[0], *self._floor_line(zone, prior[0])
+        )
+        if setting is None or setting in (before, prior[1:]) or any(
+            self._floor_shows(zone.climate_id, setting, ours)
+            for ours in (sent, line)
+        ):
+            return
+        self._floor_prior[slug] = (prior[0], *setting)
+        _LOGGER.info(
+            "MXZ floor: %s's setpoint was changed by hand during a floor run; "
+            "MXZ keeps it where it protects the room and gives it back at the "
+            "end", zone.name,
+        )
+
+    def _floor_hand_back(self, slug: str) -> None:
+        """A hands-off run that MXZ took over from a person's own run in the
+        floor's direction ended without that person changing the head's mode
+        (cleared, blind or stalled): it is theirs again at once, and the next
+        apply sends it their mode and latest setpoint, never off (P3, P15)."""
+        self._floor_expect.pop(slug, None)
+        if (prior := self._floor_prior.pop(slug, None)) is not None:
+            self._hands_off_released.add(slug)
+            self._floor_handback[slug] = (prior, 1, None)
+
+    def _floor_blind(self, zone: Zone, reason: str, kind: str = "blind") -> None:
+        """Show the room ``blind``; notify once per episode (decision 7).
+
+        A configured room can be blind before anything tripped: it has no
+        protection either way. While Home Assistant starts, an unusable sensor
+        or head may only be loading, so the notice waits for the post-start
+        recompute, which sends it if the room is still blind. A notice the
+        rate limit holds back is tried again at each compute while the room
+        stays blind, so it goes out once the hour is up.
+        """
+        self._floor_view[zone.slug] = ("blind", reason)
+        if zone.slug in self._floor_blind_noticed or self._startup_quiet:
+            return
+        if self._floor_send(
+            zone, kind, f"{zone.name}: the freeze/overheat floor is blind. {reason}"
+        ):
+            self._floor_blind_noticed.add(zone.slug)
+
+    def _floor_notify_trip(self, zone: Zone, direction: str, temp: float) -> None:
+        """Notify a trip (decision 7). One the hourly limit holds back is kept
+        and sent at the first compute after the hour while the run is still
+        going (P8); a run that ends or stalls first never sends it."""
+        unit = self._unit_symbol()
+        if direction == MODE_HEAT:
+            what = f"below its freeze floor of {zone.floor_low:g} {unit}"
+            act = "heating"
+        else:
+            what = f"above its overheat ceiling of {zone.floor_high:g} {unit}"
+            act = "cooling"
+        message = (
+            f"{zone.name} is at {temp:g} {unit}, {what}. MXZ is {act} this disabled "
+            f"room until it reaches {self._floor_clear(zone, direction):g} {unit}."
+        )
+        if self._floor_send(zone, "trip", message):
+            self._floor_trip_held.pop(zone.slug, None)
+        else:
+            self._floor_trip_held[zone.slug] = message
+
+    def _floor_attributes(self, zone: Zone) -> dict[str, str | None]:
+        """The room's floor state as the plan shows it. A driven floor whose
+        head is rejecting MXZ's commands is held, not running."""
+        state, reason = self._floor_view[zone.slug]
+        err = self._floor_rejecting.get(zone.slug)
+        if state in (MODE_HEAT, MODE_COOL) and err is not None:
+            state, reason = "held", (
+                f"{zone.climate_id} rejected MXZ's floor command ({err}). MXZ "
+                "keeps trying at each update."
+            )
+        return {"floor_state": state, "floor_reason": reason}
+
+    def _floor_rejected(
+        self, climate_id: str, err: Exception, active: dict[str, Any]
+    ) -> None:
+        """A command to a head whose floor is tripped was rejected: the plan
+        shows it held (republished as the delivery ends), and it is notified
+        once per run (decision 7); the next ordinary update tries again. A
+        notice the rate limit holds back goes out at the first rejection
+        after the hour is up. A refused hand-back: see
+        :meth:`_floor_handback_refused`."""
+        for zone in self.zones:
+            sending = self._floor_handing_back.get(zone.slug)
+            if sending is not None and sending[3] is active:
+                del self._floor_handing_back[zone.slug]
+                self._floor_handback_refused(zone, sending, err)
+                continue
+            if (
+                zone.climate_id == climate_id
+                and not zone.enable
+                and self.floor_tripped(zone.slug)
+            ):
+                self._floor_rejecting[zone.slug] = str(err)
+                if zone.slug in self._floor_reject_noticed:
+                    continue
+                if self._floor_send(
+                    zone, "rejected",
+                    f"{zone.name}: the floor's command to {climate_id} was rejected "
+                    f"({err}). MXZ keeps trying at each update.",
+                ):
+                    self._floor_reject_noticed.add(zone.slug)
+
+    def _floor_accepted(self, climate_id: str, active: dict[str, Any]) -> None:
+        """A command to this head returned (or was not needed): it is no
+        longer rejecting MXZ's floor, and a hand-back it carried landed."""
+        for zone in self.zones:
+            if zone.climate_id == climate_id:
+                self._floor_rejecting.pop(zone.slug, None)
+                sending = self._floor_handing_back.get(zone.slug)
+                if sending is not None and sending[3] is active:
+                    del self._floor_handing_back[zone.slug]
+
+    def _floor_handback_refused(
+        self, zone: Zone, sending: tuple, err: Exception
+    ) -> None:
+        """The head refused the command handing it back to its person (P3).
+        It is tried once more at the next apply, if the room is still theirs
+        and the head still shows MXZ's command; refused again, a floor notice
+        says so (NIT-1), and MXZ sends that head nothing more for it."""
+        (mode, low, high), attempt, seen, _ = sending
+        if attempt == 1:
+            self._floor_handback[zone.slug] = ((mode, low, high), 2, seen)
+            return
+        unit = self._unit_symbol()
+        setting = f"{low:g} {unit}" if low == high else f"{low:g}-{high:g} {unit}"
+        message = (
+            f"{zone.name}: the floor run is over, but {zone.climate_id} refused "
+            f"MXZ's command giving it back to {mode} at {setting}, twice ({err}). "
+            "It keeps MXZ's floor setting; MXZ sends it nothing more for this."
+        )
+        self._floor_handback_note[zone.slug] = (message, seen)
+        self._floor_flush_handback(zone, self.hass.states.get(zone.climate_id))
+
+    def _floor_flush_handback(self, zone: Zone, head: Any) -> None:
+        """Send a refused hand-back's notice; one the hourly limit holds back
+        goes out at the first compute after the hour (P5, P8), but only while
+        the room is still released and the head still shows MXZ's command."""
+        if (held := self._floor_handback_note.get(zone.slug)) is None:
+            return
+        message, seen = held
+        if self._hands_off_phase(zone) != "released" or head is None or (
+            _head_setting(head) != seen
+        ):
+            del self._floor_handback_note[zone.slug]  # no longer true
+        elif self._floor_send(zone, "handback", message):
+            del self._floor_handback_note[zone.slug]
+
+    def _floor_send(self, zone: Zone, kind: str, message: str) -> bool:
+        """Log one floor notice and send it; return whether it went out.
+
+        At most one floor notice per room per hour, whatever its kind (trip,
+        blind, stalled, rejected), so a flapping sensor or head cannot flood
+        anyone (P5). A held-back notice is logged at WARNING, once, saying so.
+        It goes to the integration's notification service; with none set, one
+        that names no service, or one Home Assistant does not have (a removed
+        app, a typo), it becomes a Home Assistant notification instead (P2,
+        P11), one per room and kind, so a repeat replaces the last.
+        """
+        slug = zone.slug
+        now = dt_util.utcnow().timestamp()
+        last = self._floor_notice_at.get(slug)
+        if last is not None and now - last < FLOOR_NOTICE_SECONDS:
+            held = self._floor_held_back.setdefault(slug, set())
+            if message not in held:
+                held.add(message)
+                _LOGGER.warning(
+                    "MXZ floor: %s (not sent: rate-limited to one floor notice "
+                    "per room per hour)", message,
+                )
+            return False
+        _LOGGER.warning("MXZ floor: %s", message)
+        if self._retired:
+            return False
+        self._floor_notice_at[slug] = now
+        self._floor_held_back.pop(slug, None)
+        domain, _, service = (self.notify_service or "").partition(".")
+
+        async def _send() -> None:
+            try:
+                if domain and service:
+                    try:
+                        await self._notify(message)
+                        return
+                    except ServiceNotFound:
+                        pass  # not registered: a Home Assistant notification
+                await self.hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "title": "HVAC Update",
+                        "message": message,
+                        "notification_id": (
+                            f"{DOMAIN}_{self.config_entry.entry_id}_floor_{slug}_{kind}"
+                        ),
+                    },
+                    blocking=False,
+                )
+            except HomeAssistantError as err:
+                _LOGGER.error("MXZ floor: the notice could not be sent: %s", err)
+
+        self.hass.async_create_task(_send())
+        return True
+
+    def _unit_symbol(self) -> str:
+        return "°C" if self.celsius else "°F"
+
+    def _floor_yield_to_person(self, zone: Zone, now: float) -> None:
+        """A person changed a hands-off head mid-run: MXZ stands down (8b).
+
+        The room is released at once (the head is theirs), and the floor
+        re-arms when the room reaches its clear line or after a while.
+        """
+        run = self._floor_runs.get(zone.slug)
+        if run is None:
+            return
+        self._floor_end(zone.slug)  # their earlier run is not handed back
+        self._floor_yield[zone.slug] = (run.direction, now)
+        self._hands_off_released.add(zone.slug)
+        # A command of ours still waiting to be sent (an off during the wait)
+        # would land over theirs: disown it, as a superseded one is. One
+        # already sent cannot be called back.
+        active = self._deliveries.get(zone.climate_id)
+        if active is not None and active["owner"] is self:
+            active["superseded"] = True
+            self._publish_delivery()
+        _LOGGER.info(
+            "MXZ floor: %s's head was changed by hand during a floor run; "
+            "MXZ leaves it to that person until the floor re-arms", zone.name,
+        )
+
+    def floor_record(self, slug: str) -> dict[str, Any]:
+        """What the enable switch persists for this room's floor (may be empty).
+
+        A record exists only while a run or a yield does, so a room with no
+        floor stores exactly what it stored before floors existed.
+        """
+        record: dict[str, Any] = {}
+        if (run := self._floor_runs.get(slug)) is not None:
+            record["floor_run"] = {
+                "direction": run.direction, "mark": run.mark, "worst": run.worst,
+                "driven": run.driven, "stalled": run.stalled,
+                "window": [[at, seen] for at, seen in run.recent],
+            }
+        if (prior := self._floor_prior.get(slug)) is not None:
+            record["floor_prior"] = {"mode": prior[0], "low": prior[1], "high": prior[2]}
+        if (yielded := self._floor_yield.get(slug)) is not None:
+            record["floor_yield"] = {"direction": yielded[0], "at": yielded[1]}
+        return record
+
+    def restore_floor(self, slug: str, data: dict[str, Any]) -> None:
+        """The enable switch restored a disabled room's floor record.
+
+        Only a well-formed record for a floor still configured is taken; any
+        other is dropped, and the room's first compute decides afresh (a
+        hands-off room then parks, since a run had un-released it). Downtime
+        is not charged to the no-progress clock. A run without a readable
+        ``window`` (as 3.7.0 betas before P9 stored it) restarts its re-arm
+        window from the next reading.
+        """
+        zone = next((z for z in self.zones if z.slug == slug), None)
+        if zone is None:
+            return
+
+        def configured(direction: Any) -> bool:
+            return (direction == MODE_HEAT and zone.floor_low is not None) or (
+                direction == MODE_COOL and zone.floor_high is not None
+            )
+
+        run = data.get("floor_run")
+        if isinstance(run, dict) and configured(run.get("direction")):
+            numbers = [_finite(run.get(key)) for key in ("mark", "worst", "driven")]
+            if None not in numbers and isinstance(run.get("stalled"), bool):
+                mark, worst, driven = numbers
+                self._floor_runs[slug] = FloorRun(
+                    direction=run["direction"], mark=mark, worst=worst,
+                    driven=max(driven, 0.0), stalled=run["stalled"],
+                    recent=_floor_window(run.get("window")),
+                )
+                prior = data.get("floor_prior")
+                if isinstance(prior, dict) and prior.get("mode") == run["direction"]:
+                    low, high = _finite(prior.get("low")), _finite(prior.get("high"))
+                    if low is not None and high is not None:
+                        self._floor_prior[slug] = (run["direction"], low, high)
+        yielded = data.get("floor_yield")
+        if isinstance(yielded, dict) and configured(yielded.get("direction")):
+            since = _finite(yielded.get("at"))
+            if since is not None:
+                self._floor_yield[slug] = (yielded["direction"], since)
 
     # -- entity-driven mutations --------------------------------------------
     def zone_drift(self, zone: Zone) -> float:
@@ -3562,3 +4283,42 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _head_setting(head: Any) -> tuple:
+    """What a head shows a person: its mode and setpoints."""
+    return (head.state, *(
+        head.attributes.get(key)
+        for key in ("target_temp_low", "target_temp_high", "temperature")
+    ))
+
+
+def _floor_setting(head: Any) -> tuple[float, float] | None:
+    """A head's setpoints as (low, high); a single-setpoint head's one
+    setpoint is both. None if it shows none."""
+    if int(head.attributes.get("supported_features") or 0) & 2:
+        low = _as_float(head.attributes.get("target_temp_low"))
+        high = _as_float(head.attributes.get("target_temp_high"))
+    else:
+        low = high = _as_float(head.attributes.get("temperature"))
+    return None if low is None or high is None else (low, high)
+
+
+def _floor_window(value: Any) -> tuple[tuple[float, float], ...]:
+    """A stored re-arm window: [[driven, reading], ...], else empty."""
+    if not isinstance(value, list):
+        return ()
+    pairs = [
+        (_finite(item[0]), _finite(item[1]))
+        for item in value if isinstance(item, list) and len(item) == 2
+    ]
+    if len(pairs) != len(value) or any(None in pair for pair in pairs):
+        return ()
+    return tuple(pairs)
+
+
+def _finite(value: Any) -> float | None:
+    """A stored number as a finite float, else None (a bool is not a number)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None

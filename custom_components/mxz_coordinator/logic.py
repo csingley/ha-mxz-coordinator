@@ -8,7 +8,7 @@ unit-tested directly.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .const import (
@@ -19,6 +19,7 @@ from .const import (
     ENGAGE_SATISFIED,
     EVIDENCE_HA_WRITE,
     EVIDENCE_SAMPLE_TIMESTAMP,
+    FLOOR_REARM_SECONDS,
     HEALTH_AWAITING,
     HEALTH_CADENCE_UNKNOWN,
     HEALTH_HEALTHY,
@@ -356,6 +357,11 @@ def shared_mode(
 PRIORITY_SAFETY = -1
 PRIORITY_DEMAND = 0
 PRIORITY_VOTE = 1
+# A tripped freeze floor (a disabled room's heat at its floor) outranks every
+# other want, a PRIORITY_SAFETY one included: freeze first. A tripped overheat
+# ceiling sits at PRIORITY_SAFETY with its room index, so it settles against a
+# safety room by room order. Nothing else ever carries this tier.
+PRIORITY_FLOOR_HEAT = -2
 
 
 @dataclass(frozen=True)
@@ -391,10 +397,10 @@ class Grant:
     agrees with -- there is nothing left to exempt from the dwell clock once
     nothing is proposing a change.
 
-    ``by_safety`` is True while a PRIORITY_SAFETY Demand with a direction is
-    active and that direction is the answer. It does not claim the safety
-    tier changed the answer: the same answer may follow from order or the
-    dwell alone.
+    ``by_safety`` is True while a PRIORITY_SAFETY (or freeze floor) Demand
+    with a direction is active and that direction is the answer. It does not
+    claim the safety tier changed the answer: the same answer may follow from
+    order or the dwell alone.
     """
 
     direction: str
@@ -429,14 +435,20 @@ def arbitrate(
     engaged) must not have the mode taken from it by a mere vote, even
     though its demand itself has gone quiet. It only ever suppresses an
     ORDINARY vote (PRIORITY_VOTE, read_only) -- never a safety one.
+
+    A tripped floor is one more commanding Demand: a freeze floor at
+    PRIORITY_FLOOR_HEAT (ahead of every safety want), an overheat ceiling at
+    PRIORITY_SAFETY. A standoff goes to the first ranked direction, so heat
+    from a floor beats cool from a ceiling whatever their rooms' order, and
+    two trips of one kind settle by room order.
     """
     ranked = sorted(demands, key=lambda d: d.priority)
     commanding = [d for d in ranked if not d.read_only]
     safety_votes = [
-        d for d in ranked if d.read_only and d.priority[0] == PRIORITY_SAFETY
+        d for d in ranked if d.read_only and d.priority[0] <= PRIORITY_SAFETY
     ]
     ordinary_votes = [
-        d for d in ranked if d.read_only and d.priority[0] != PRIORITY_SAFETY
+        d for d in ranked if d.read_only and d.priority[0] > PRIORITY_SAFETY
     ]
     commanding_silent = not any(d.direction for d in commanding)
     gate_open = commanding_silent and not engaged
@@ -449,7 +461,7 @@ def arbitrate(
         current=current, allowed=allowed, resting=resting,
     )
     by_safety = any(
-        d.direction == full and d.priority[0] == PRIORITY_SAFETY for d in active
+        d.direction == full and d.priority[0] <= PRIORITY_SAFETY for d in active
     )
     if not any(d.read_only and d.direction for d in active):
         return Grant(direction=full, read_only=False, by_safety=by_safety)
@@ -464,6 +476,105 @@ def arbitrate(
     # coordinator causes -- so it stamps like any other flip.
     read_only = full != plain and gate_open
     return Grant(direction=full, read_only=read_only, by_safety=by_safety)
+
+
+def floor_call(
+    *,
+    temp: float,
+    sensor_ok: bool,
+    low: float | None,
+    high: float | None,
+    prior: str | None,
+    margin: float,
+) -> str | None:
+    """A disabled room's floor want: heat, cool, or None. Pure.
+
+    Untripped (``prior`` None): heat below ``low``, cool above ``high``.
+    Tripped heat holds until the room reaches ``low + margin`` (the clear
+    line), tripped cool until ``high - margin``; then the floor is untripped
+    and re-trips only past the floor again. The margin is the whole minimum
+    run: no separate timer. Without a usable reading there is no want, from
+    any prior: a floor never acts blind. ``None`` for ``low``/``high`` is no
+    floor/ceiling.
+    """
+    if not sensor_ok:
+        return None
+    if prior == MODE_HEAT and low is not None and temp < low + margin:
+        return MODE_HEAT
+    if prior == MODE_COOL and high is not None and temp > high - margin:
+        return MODE_COOL
+    if low is not None and temp < low:
+        return MODE_HEAT
+    if high is not None and temp > high:
+        return MODE_COOL
+    return None
+
+
+@dataclass(frozen=True)
+class FloorRun:
+    """One tripped floor's progress record (the no-progress cap's state).
+
+    ``mark`` is the best reading credited this run (highest for heat, lowest
+    for cool), moved only by a whole ``step``; ``driven`` is how many seconds
+    MXZ has driven the head in the floor's direction since the mark last
+    moved; ``worst`` is the worst reading (lowest for heat) in the last
+    ``FLOOR_REARM_SECONDS`` of that driving, frozen once the run stalls, so
+    only a genuinely new low past it re-arms the run. ``recent`` holds the
+    readings that window needs, as (``driven`` when read, reading), oldest
+    first: only those that are still in it and worse than every later one.
+    """
+
+    direction: str
+    mark: float
+    worst: float
+    driven: float = 0.0
+    stalled: bool = False
+    recent: tuple[tuple[float, float], ...] = ()
+
+
+def floor_progress(
+    run: FloorRun, *, temp: float, driven_for: float, step: float, cap: float
+) -> FloorRun:
+    """Advance one floor run by one reading. Pure.
+
+    ``driven_for`` is the time the head was actually driven in the run's
+    direction since the last reading (0 while it waited). A reading one
+    ``step`` past the mark moves the mark there and restarts the clock; a
+    clock that reaches ``cap`` stalls the run. A stalled run re-arms (as a
+    new run) only on a reading one step past its worst one in the last
+    ``FLOOR_REARM_SECONDS`` of driving before the stall (decision 11, P9);
+    reaching the clear line is the caller's other way out
+    (:func:`floor_call`). The window is on the run's own clock (driven
+    time), so a dip an hour of driving or more before the stall no longer
+    counts. ``worst`` restarts at each gain and is frozen while stalled, so
+    a room that keeps cooling in sub-step increments re-arms once it is one
+    step below it. A sensor flickering between two adjacent values does
+    neither: its low is in the window, and is already the window's worst,
+    while that low recurs within each ``FLOOR_REARM_SECONDS`` of driving. A
+    value held longer than that with nothing worse, then a reading one step
+    past it, re-arms (P14).
+    """
+    sign = 1.0 if run.direction == MODE_HEAT else -1.0
+    if run.stalled:
+        if sign * (run.worst - temp) >= step - 1e-9:
+            return FloorRun(direction=run.direction, mark=temp, worst=temp)
+        return run
+    gained = sign * (temp - run.mark) >= step - 1e-9
+    if gained:
+        return replace(run, mark=temp, worst=temp, driven=0.0, recent=())
+    driven = run.driven + max(driven_for, 0.0)
+    # A reading leaves the window once older than its span, or once a later
+    # one is as bad or worse (it can no longer be the window's worst).
+    recent = (
+        *(
+            (at, seen) for at, seen in run.recent
+            if at >= driven - FLOOR_REARM_SECONDS and sign * (temp - seen) > 0
+        ),
+        (driven, temp),
+    )
+    return replace(
+        run, worst=recent[0][1], driven=driven, stalled=driven >= cap, recent=recent
+    )
 
 
 def setpoints(
