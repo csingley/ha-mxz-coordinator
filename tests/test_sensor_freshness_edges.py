@@ -1230,6 +1230,9 @@ async def test_stale_off_after_dry_uses_the_dwell_reconstructed_after_a_reload(
     await hass.async_block_till_done()
     coord: MXZCoordinator = entry.runtime_data
     reload_at = _now()
+    # The coil-dry stamp runs on time.monotonic, which freezer moves with the
+    # wall clock; it is read on its own clock here, never against _now().
+    reload_clock = time.monotonic()
     await _drain_startup(hass, freezer)
     assert _health(coord) == HEALTH_AWAITING
     if observed == MODE_COOL:
@@ -1252,15 +1255,15 @@ async def test_stale_off_after_dry_uses_the_dwell_reconstructed_after_a_reload(
         assert _health(coord) == HEALTH_STALE
     seeded = coord._last_active[head_a]
     assert seeded[0] == MODE_COOL, "the EXISTING reconstruction: observed = cooling"
-    assert seeded[1] >= reload_at, "stamped by this incarnation, not carried over"
+    assert seeded[1] >= reload_clock, "stamped by this incarnation, not carried over"
     if observed == MODE_FAN_ONLY:
-        assert seeded[1] == reload_at, "seeded at the first idle resolution, on reload"
+        assert seeded[1] == reload_clock, "seeded at the first idle resolution, on reload"
     else:
-        assert seeded[1] >= reload_at + 180, "seeded at the park itself"
+        assert seeded[1] >= reload_clock + 180, "seeded at the park itself"
     assert hass.states.get(head_a).state == MODE_FAN_ONLY
     deadline = seeded[1] + 600
 
-    await _exact(hass, freezer, timedelta(seconds=deadline - 1 - _now()))
+    await _exact(hass, freezer, timedelta(seconds=deadline - 1 - time.monotonic()))
     await _recompute(hass, entry)
     assert hass.states.get(head_a).state == MODE_FAN_ONLY, "still inside the dwell"
     assert coord._last_active[head_a] == seeded, "the stale transition restarted nothing"
@@ -1269,7 +1272,7 @@ async def test_stale_off_after_dry_uses_the_dwell_reconstructed_after_a_reload(
     assert hass.states.get(head_a).state == MODE_OFF, "off at the reconstructed deadline"
     assert _health(coord) == HEALTH_STALE
     if observed == MODE_FAN_ONLY:
-        assert deadline < reload_at + 180 + 600, "not ten minutes from going stale"
+        assert deadline < reload_clock + 180 + 600, "not ten minutes from going stale"
 
 
 async def test_every_automatic_room_unhealthy_parks_both_under_a_retained_cool_token(

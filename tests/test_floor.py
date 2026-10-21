@@ -10,6 +10,7 @@ device. The pure math is in ``test_floor_logic.py``.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,9 @@ from custom_components.mxz_coordinator.const import (
     CONF_NOTIFY_SERVICE,
     CONF_ZONES,
     DOMAIN,
+    FLOOR_NOTICE_SECONDS,
+    FLOOR_STALL_SECONDS,
+    FLOOR_YIELD_SECONDS,
     IDLE_ACTION_FAN_ONLY,
     IDLE_ACTION_OFF_AFTER_DRY,
     INHIBIT_ACTION_ECO,
@@ -53,7 +57,8 @@ from custom_components.mxz_coordinator.const import (
     ZONE_SENSOR,
 )
 from custom_components.mxz_coordinator.sensor import _ATTRS
-from tests.dwell import assert_restamped, expire_dwell
+from tests.clocks import age_floor_clock, age_floor_notice, jump_wall_clock
+from tests.dwell import RESTAMP_TOLERANCE, assert_restamped, expire_dwell
 from tests.flow_pages import open_options_page, prefilled, submit, suggested
 from tests.test_drive import (
     SENSOR_A,
@@ -1767,6 +1772,33 @@ async def test_p5_two_rooms_are_limited_independently(hass: HomeAssistant, freez
     assert len(f.notes) == 3 and f.notes[2].startswith("Primary") and "blind" in f.notes[2]
 
 
+@pytest.mark.parametrize("step", [1, -1], ids=["forward", "back"])
+async def test_p5_a_wall_clock_step_neither_lifts_nor_extends_the_notice_limit(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, step: int
+) -> None:
+    """P5: the hour is counted on the monotonic clock. After a trip notice,
+    an NTP step or a clock set by hand, an hour past the limit either way,
+    lets no blind notice through; it goes out when the hour has passed on the
+    limit's own clock, not a minute before."""
+    f = await _setup(hass)
+    await f.temp(SENSOR_B, 45)
+    assert len(f.notes) == 1 and "freeze floor" in f.notes[0]
+    stamp = f.coord._floor_notice_at["secondary"]
+    now = time.monotonic()
+    assert now - RESTAMP_TOLERANCE < stamp <= now, (stamp, now)
+    jump_wall_clock(monkeypatch, step * (FLOOR_NOTICE_SECONDS + 3600))
+    await _flap(f, ("unavailable",))
+    assert f.floor(1)[0] == "blind"
+    assert len(f.notes) == 1, "held back: the step lifted nothing"
+
+    age_floor_notice(f.coord, "secondary", FLOOR_NOTICE_SECONDS - 60)
+    await f.compute()
+    assert len(f.notes) == 1
+    age_floor_notice(f.coord, "secondary", 60)
+    await f.compute()
+    assert len(f.notes) == 2 and "blind" in f.notes[1], "and extended nothing"
+
+
 async def test_p8_a_held_back_trip_notice_goes_out_after_the_hour_while_the_run_lasts(
     hass: HomeAssistant, freezer
 ) -> None:
@@ -1894,6 +1926,42 @@ async def test_d8b_yield_rearms_after_four_hours(hass: HomeAssistant, freezer) -
     await f.compute()
     assert (_s(hass, f.b), f.floor(1)[0]) == ("off", "yielded")
     await _tick(hass, freezer, timedelta(minutes=2))
+    await f.compute()
+    assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
+
+
+async def test_d8b_a_yield_is_stored_and_restored_on_the_wall_clock(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 8(b), restart: the yield is the one floor time that is stored
+    and shown, so it stays on the wall clock. The record holds the wall-clock
+    instant of the yield and nothing from the monotonic clocks (driven time,
+    notice limit, coil-dry, mode-change wait). After the restart the restored
+    yield is still compared with the wall clock: it holds a minute before
+    four hours have passed on it, and re-arms a minute after."""
+    f = await _setup(hass, hands_off=(False, True))
+    await f.temp(SENSOR_B, 45)
+    await f.compute()
+    assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
+    await _remote(hass, f.b, "off")
+    await f.compute()
+    yielded_at = dt_util.utcnow().timestamp()
+    assert f.floor(1)[0] == "yielded"
+    await _shutdown(hass, f.entry)
+    stored = rs.async_get(hass).last_states[_eid(hass, f.entry, "_secondary_enable")]
+    data = stored.extra_data.as_dict()
+    assert set(data) == {"hands_off_released", "floor_yield"}
+    assert data["floor_yield"]["direction"] == "heat"
+    assert yielded_at - RESTAMP_TOLERANCE < data["floor_yield"]["at"] <= yielded_at
+
+    jump_wall_clock(monkeypatch, FLOOR_YIELD_SECONDS - 60)
+    await _startup(hass, f.entry)
+    await f.compute()
+    state, reason = f.floor(1)
+    rearm = dt_util.utc_from_timestamp(data["floor_yield"]["at"] + FLOOR_YIELD_SECONDS)
+    assert (_s(hass, f.b), state) == ("off", "yielded")
+    assert reason.endswith(f"at {rearm.isoformat(timespec='minutes')}.")
+    jump_wall_clock(monkeypatch, 120)
     await f.compute()
     assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
 
@@ -2291,6 +2359,39 @@ async def test_d11_coordinator_off_mid_run_charges_nothing(hass: HomeAssistant, 
     await f.switch("_coordinator_enable", True)
     assert f.coord._floor_runs["secondary"].driven == pytest.approx(3600, abs=1)
     assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
+
+
+@pytest.mark.parametrize("step", [1, -1], ids=["forward", "back"])
+async def test_d11_a_wall_clock_step_neither_stalls_a_run_nor_holds_it_back(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, step: int
+) -> None:
+    """Decision 11: driven time is counted on the monotonic clock. An NTP step
+    or a clock set by hand, an hour past the whole cap either way, between two
+    computes charges nothing and takes nothing off what was driven; the run
+    still stalls when two hours of driving have passed on its own clock, not
+    a minute before."""
+    f = await _setup(hass)
+    await f.temp(SENSOR_A, 76)
+    await f.temp(SENSOR_B, 45)
+    assert (f.plan.state, _s(hass, f.b)) == ("heat", "heat")
+    jump_wall_clock(monkeypatch, step * (FLOOR_STALL_SECONDS + 3600))
+    await f.compute()
+    run = f.coord._floor_runs["secondary"]
+    assert 0 <= run.driven < RESTAMP_TOLERANCE and not run.stalled, run
+    assert f.floor(1)[0] == "heat"
+
+    age_floor_clock(f.coord, "secondary", FLOOR_STALL_SECONDS - 60)
+    jump_wall_clock(monkeypatch, step * (FLOOR_STALL_SECONDS + 3600))
+    await f.compute()
+    run = f.coord._floor_runs["secondary"]
+    assert FLOOR_STALL_SECONDS - 60 <= run.driven < FLOOR_STALL_SECONDS - 60 + RESTAMP_TOLERANCE
+    assert not run.stalled and f.floor(1)[0] == "heat"
+    age_floor_clock(f.coord, "secondary", 60)
+    await f.compute()
+    assert f.coord._floor_runs["secondary"].stalled
+    state, reason = f.floor(1)
+    assert state == "blind" and reason.startswith("Stalled")
+    assert (f.plan.state, _s(hass, f.b)) == ("cool", "off")
 
 
 async def test_kill_switch_off_floor_never_starts(hass: HomeAssistant) -> None:

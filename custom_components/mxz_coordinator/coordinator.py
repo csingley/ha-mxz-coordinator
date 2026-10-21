@@ -477,9 +477,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.coil_dry_seconds: float = 60.0 * float(
             conf.get(CONF_COIL_DRY_MINUTES, DEFAULT_COIL_DRY_MINUTES)
         )
-        # Per-head memory of the last ACTIVE mode we commanded (mode, utc ts),
+        # Per-head memory of the last ACTIVE mode we commanded (mode, ts),
         # re-stamped every apply cycle while running — so the timestamp reads
         # as "when conditioning stopped". Drives the off_after_dry dwell.
+        # Monotonic, like the mode-change dwell: a wall-clock step must not
+        # cut the coil-dry wait short or stretch it. In memory only.
         self._last_active: dict[str, tuple[str, float]] = {}
         self._dry_timers: dict[str, Any] = {}
         # Delta-proportional fan boost (overrides the firmware's weak "auto").
@@ -548,8 +550,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Freeze floor / overheat ceiling, for a disabled room that sets one.
         # Per room: the tripped run's progress record; whether the last compute
         # found MXZ driving its head in the floor's direction (the no-progress
-        # clock runs only then) and when that compute ran; a hands-off room's
-        # yield to a person (direction, time); and what the plan shows.
+        # clock runs only then) and when that compute ran, on the monotonic
+        # clock (in memory only); a hands-off room's yield to a person
+        # (direction, wall-clock time: it is stored and shown); and what the
+        # plan shows.
         self._floor_runs: dict[str, FloorRun] = {}
         self._floor_driving: dict[str, bool] = {}
         self._floor_eval_ts: dict[str, float] = {}
@@ -575,7 +579,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._floor_blind_noticed: set[str] = set()
         self._floor_reject_noticed: set[str] = set()
         # The rate limit (P5): when each room's last floor notice went out,
-        # and the notices held back since (each logged once). In memory only.
+        # on the monotonic clock, and the notices held back since (each
+        # logged once). In memory only.
         self._floor_notice_at: dict[str, float] = {}
         self._floor_held_back: dict[str, set[str]] = {}
         # A trip notice the limit held back, sent once the hour is up if its
@@ -2008,7 +2013,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._floor_accepted(climate_id, active)
             return
         if act in (MODE_COOL, MODE_HEAT):
-            self._last_active[climate_id] = (act, dt_util.utcnow().timestamp())
+            self._last_active[climate_id] = (act, time.monotonic())
         if act != MODE_FAN_ONLY:
             self._cancel_dry_timer(climate_id)
         cur = self.hass.states.get(climate_id)
@@ -2208,8 +2213,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _resolve_dry_idle(self, climate_id: str) -> str:
         """off_after_dry: fan_only while the post-cooling dry dwell runs, else off.
 
-        The dwell is a timestamp comparison — the recompute cycle is the clock,
-        so a restart can never strand a head in fan_only. The one-shot nudge
+        The dwell is a monotonic timestamp comparison — the recompute cycle is
+        the clock, so a restart can never strand a head in fan_only. The one-shot nudge
         timer only makes the flip prompt (the 15-min heartbeat would otherwise
         stretch a 10-min dwell).
         """
@@ -2218,9 +2223,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             rec = self._seed_last_active(climate_id)
         if rec is None or rec[0] != MODE_COOL:
             return MODE_OFF  # heat leaves no wet coil; never-ran owes no dwell
-        remaining = self.coil_dry_seconds - (
-            dt_util.utcnow().timestamp() - rec[1]
-        )
+        remaining = self.coil_dry_seconds - (time.monotonic() - rec[1])
         if remaining <= 0:
             return MODE_OFF
         self._arm_dry_timer(climate_id, remaining)
@@ -2238,7 +2241,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         state = self.hass.states.get(climate_id)
         mode = state.state if state is not None else None
         if mode in (MODE_COOL, MODE_FAN_ONLY):
-            rec = (MODE_COOL, dt_util.utcnow().timestamp())
+            rec = (MODE_COOL, time.monotonic())
             self._last_active[climate_id] = rec
             return rec
         return None
@@ -3565,12 +3568,16 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Coordinator off or Home Assistant downtime costs nothing.
         """
         slug = zone.slug
+        # Driven time is counted on the monotonic clock, so a wall-clock step
+        # cannot stall a run early or hold one back. ``now`` (wall clock)
+        # stays for the yield, which is stored and shown as a time.
+        clock = time.monotonic()
         driven_for = (
-            now - self._floor_eval_ts[slug]
+            clock - self._floor_eval_ts[slug]
             if self._floor_driving.get(slug) and slug in self._floor_eval_ts
             else 0.0
         )
-        self._floor_eval_ts[slug] = now
+        self._floor_eval_ts[slug] = clock
         self._floor_driving[slug] = False
         configured = zone.floor_low is not None or zone.floor_high is not None
         if not self._floor_live:
@@ -3957,7 +3964,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         P11), one per room and kind, so a repeat replaces the last.
         """
         slug = zone.slug
-        now = dt_util.utcnow().timestamp()
+        now = time.monotonic()
         last = self._floor_notice_at.get(slug)
         if last is not None and now - last < FLOOR_NOTICE_SECONDS:
             held = self._floor_held_back.setdefault(slug, set())

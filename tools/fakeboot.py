@@ -1,9 +1,11 @@
 """Run the suite as if the host had just booted: ``-p tools.fakeboot``.
 
 The mode-flip dwell runs on ``time.monotonic()`` (#32), whose origin on Linux
-is the boot. A test that ages the dwell with a wall-clock habit (stamp ``0.0``
-for "long ago") passes on a long-running host and fails on a fresh one, so
-CI runs the whole suite a second time with this plugin, to fail it on any host.
+is the boot; so do the coil-dry wait and the floor's driven-time clock and
+notice limit. A test that ages one of them with a wall-clock habit (stamp
+``0.0`` for "long ago") passes on a long-running host and fails on a fresh
+one, so CI runs the whole suite a second time with this plugin, to fail it on
+any host.
 
 It offsets ``time.monotonic`` so the clock reads ``FAKE_UPTIME`` seconds
 (default 120, below the default hysteresis) when the plugin loads, then counts
