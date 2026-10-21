@@ -39,7 +39,8 @@ case "$mode" in
     if test "$mode" = sentinel; then
       args=(60s tests/test_changeover.py::test_changeover_from_temperature_sensor)
     else
-      args=(180s tests/)
+      # 300 s, as in ci.yml: slower hosted runners have needed ~195 s.
+      args=(300s tests/)
     fi
     result=0
     timeout --signal=TERM --kill-after=5s "${args[0]}" "$python" -m pytest \
@@ -51,7 +52,7 @@ case "$mode" in
     # The full suite again on a clock that reads as if the runner had booted
     # two minutes ago (tools/fakeboot.py), with the same phases and limit.
     result=0
-    FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 180s "$python" -m pytest \
+    FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 300s "$python" -m pytest \
       -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider > "$root/fakeboot.log" 2>&1 || result=$?
     printf '%s\n' "$result" > "$root/fakeboot.exit"
     exit "$result"
