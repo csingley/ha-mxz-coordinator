@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, STATE_ON, UnitOfTemperature
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceNotFound
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_component import DATA_INSTANCES
 from homeassistant.helpers.event import (
@@ -3767,9 +3767,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         At most one floor notice per room per hour, whatever its kind (trip,
         blind, stalled, rejected), so a flapping sensor or head cannot flood
         anyone (P5). A held-back notice is logged at WARNING, once, saying so.
-        It goes to the integration's notification service; with none set (or
-        one that names no service) it becomes a Home Assistant notification
-        instead (P2), one per room and kind, so a repeat replaces the last.
+        It goes to the integration's notification service; with none set, one
+        that names no service, or one Home Assistant does not have (a removed
+        app, a typo), it becomes a Home Assistant notification instead (P2,
+        P11), one per room and kind, so a repeat replaces the last.
         """
         slug = zone.slug
         now = dt_util.utcnow().timestamp()
@@ -3793,8 +3794,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         async def _send() -> None:
             try:
                 if domain and service:
-                    await self._notify(message)
-                    return
+                    try:
+                        await self._notify(message)
+                        return
+                    except ServiceNotFound:
+                        pass  # not registered: a Home Assistant notification
                 await self.hass.services.async_call(
                     "persistent_notification",
                     "create",

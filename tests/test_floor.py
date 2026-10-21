@@ -887,6 +887,50 @@ async def test_p2_a_notify_service_naming_no_service_falls_back(hass: HomeAssist
     assert f.notes == [] and len(f.pinned) == 1
 
 
+async def test_p11_a_notify_service_home_assistant_does_not_have_falls_back(
+    hass: HomeAssistant, freezer, caplog
+) -> None:
+    """P11: the configured service is well formed but nothing provides it
+    (``notify.nowhere``: a removed phone app, a typo). The trip notice
+    becomes the same Home Assistant notification as with no service, with
+    the same id, and nothing is logged as a failed send. It counts as the
+    room's notice for the hour (P5): the blind notice 5 minutes later is
+    held back, and goes out as the room's blind notification after the
+    hour."""
+    f = await _setup(hass, notify=False, **{CONF_NOTIFY_SERVICE: "notify.nowhere"})
+    assert not hass.services.has_service("notify", "nowhere")
+    await f.temp(SENSOR_B, 45)
+    await hass.async_block_till_done()
+    base = f"mxz_coordinator_{f.entry.entry_id}_floor_secondary"
+    assert (_s(hass, f.b), f.notes) == ("heat", [])
+    assert [pid for pid, _ in f.pinned] == [f"{base}_trip"]
+    assert "below its freeze floor of 50 °F" in f.pinned[0][1]
+    assert not any("could not be sent" in r.getMessage() for r in caplog.records)
+    await _tick(hass, freezer, timedelta(minutes=5))
+    await _flap(f, ("unavailable",))
+    assert len(f.pinned) == 1
+    await _tick(hass, freezer, timedelta(minutes=56))
+    await f.compute()
+    await hass.async_block_till_done()
+    assert [pid for pid, _ in f.pinned] == [f"{base}_trip", f"{base}_blind"]
+
+
+async def test_p11_the_drift_notice_path_is_unchanged_for_a_missing_service(
+    hass: HomeAssistant,
+) -> None:
+    """P11 is for floor notices only: the drift notice (``_notify``) still
+    calls the configured service as before, so a missing one raises Home
+    Assistant's ServiceNotFound there, and no Home Assistant notification
+    is made for it."""
+    from homeassistant.exceptions import ServiceNotFound
+
+    f = await _setup(hass, notify=False, **{CONF_NOTIFY_SERVICE: "notify.nowhere"})
+    with pytest.raises(ServiceNotFound):
+        await f.coord._notify("drift text")
+    await hass.async_block_till_done()
+    assert f.notes == [] and f.pinned == []
+
+
 # ---------------------------------------------------------------------------
 # P5: at most one floor notice per room per hour
 # ---------------------------------------------------------------------------
