@@ -549,7 +549,10 @@ def floor_progress(
     counts. ``worst`` restarts at each gain and is frozen while stalled, so
     a room that keeps cooling in sub-step increments re-arms once it is one
     step below it. A sensor flickering between two adjacent values does
-    neither: its low is in the window, and is already the window's worst.
+    neither: its low is in the window, and is already the window's worst,
+    while that low recurs within each ``FLOOR_REARM_SECONDS`` of driving. A
+    value held longer than that with nothing worse, then a reading one step
+    past it, re-arms (P14).
     """
     sign = 1.0 if run.direction == MODE_HEAT else -1.0
     if run.stalled:

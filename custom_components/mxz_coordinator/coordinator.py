@@ -1786,6 +1786,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             task = self._queue_delivery(zone.climate_id, *theirs)
                             if task is not None:
                                 tasks.append(task)
+                                # A delivery superseded before it reaches the
+                                # head ends with neither accepted nor rejected,
+                                # so this entry stays until the next hand-back
+                                # overwrites it. Harmless: it is matched only
+                                # by its delivery's identity, never acted on.
                                 self._floor_handing_back[zone.slug] = (
                                     theirs, attempt, seen,
                                     self._deliveries[zone.climate_id],

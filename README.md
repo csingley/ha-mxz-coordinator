@@ -870,12 +870,20 @@ What it does:
   hands back with the head off.
 - **If the head refuses the hand-back**, MXZ tries once more at the next update, but
   only while the room is still theirs and the head still shows MXZ's command; a change
-  anyone made to the head since cancels it. Refused again, MXZ sends a notice saying
-  the head could not be handed back and leaves it as it is. A hand-back that could not
-  be sent at all is not sent later: with Coordinator off the head keeps what it last
-  had. A hand-back that lands during an `eco` standby hold is dropped, the head is
-  turned off, and the person's heat does not come back when the hold ends. An `off` or
-  `fan_only` hold parks the head as it parks every head.
+  anyone made to the head since cancels it. That one retry is dropped, with no notice,
+  if the next update cannot reach the room: Coordinator off, a standby hold, a vane
+  kick on that head, the plan not ready, the head unavailable, or a command to that
+  head still in flight. Refused again, MXZ leaves the head as it is and sends a notice
+  saying it could not be handed back. That notice counts toward the limit of one
+  notice per room per hour (below): if it is held back, it goes out after the hour
+  only while the room is still released and the head still shows MXZ's command, and
+  is dropped otherwise. A hand-back that could not be sent at all is not sent later:
+  with Coordinator off the head keeps what it last had. A hand-back that lands during
+  an `eco` standby hold is dropped, the head is turned off, and the person's heat does
+  not come back when the hold ends. An `off` or `fan_only` hold parks the head as it
+  parks every head. A known limitation: if the floor trips again before a refused
+  hand-back lands, what MXZ remembers and hands back at the next clear is what the
+  head shows then, MXZ's setpoint in the person's mode, not the setpoint they had.
 - **A person at the head.** On a held-off room, MXZ puts its heat or cool back at the
   next room-sensor report or the 15-minute check. On a room run from its own remote,
   changing the head's mode during a run hands it to that person at once: MXZ stands
@@ -883,7 +891,9 @@ What it does:
   again, so someone who keeps turning the head off in a freezing room is overridden
   again every 4 hours. Changing only the setpoint is not handing it over: on either
   kind of room MXZ writes its run's setpoint back at the next update (the clear
-  line's, or the warmer one it kept from before the run), until the run ends.
+  line's, or the warmer one it kept from before the run), until the run ends. That
+  includes a raise: a person heating at 70 °F who turns the head up to 74 °F during
+  the run gets 70 °F back at the next update, and 70 °F when the run ends.
 - **Standby hold and Coordinator.** It still runs under an `eco` standby hold, the
   default for a load-shed, so a held-off or own-remote head can start during one. It
   never runs under an `off` or `fan_only` hold. With Coordinator off it sends nothing;
@@ -902,14 +912,18 @@ What it does:
   it was rate-limited. A held-back notice goes out at the first update after the hour
   if it is still true then: a blind, stalled or rejected room still in that state, a
   trip whose run is still going (a run that clears, ends or stalls first never sends
-  it), a refused hand-back whose head still shows MXZ's command. The plan always shows
-  the current state.
+  it), a refused hand-back whose room is still released and whose head still shows
+  MXZ's command. The plan always shows the current state.
 - **Restarts.** A run in progress, with its progress record, survives a Home Assistant
   restart. Time Home Assistant is down does not count toward the 2-hour limit. Which
-  notices were sent, the hourly limit, held-back notices and a hand-back's one retry
-  are kept only in memory: after a restart a room that is still stalled or blind
-  notifies once more, and a held-back notice or a pending retry is lost. That is
-  accepted.
+  notices were sent and the hourly limit are kept only in memory, so after a restart
+  a room that is still stalled or blind notifies once more; that is intended.
+  Held-back notices and a hand-back's one retry are also kept only in memory, and
+  losing them is a known limitation of 3.7.0, which I accepted for this release; a
+  fix is planned after 3.7.0. After a restart a held-back notice, a held-back trip
+  notice included, or a pending hand-back retry is lost. A run restored after a
+  restart is not a new trip, so a trip notice held back before the restart is never
+  sent, although the plan sensor shows the run throughout.
 
 When it does not act (fail safe):
 
@@ -929,8 +943,14 @@ When it does not act (fail safe):
   heated from 40 °F to 44 °F and then stalled is armed again at 43 °F. A dip earlier
   than that hour does not count: a room that heated to 44 °F, dipped to 41 °F when a
   door opened, recovered to 43.5 °F and stalled there more than an hour of driving
-  later is armed again at 42.5 °F; had the dip been within that hour, at 40 °F. A
-  sensor flickering between two values does neither. A real but
+  later is armed again at 42.5 °F; had the dip been within that hour, at 40 °F. That
+  hour counts only the run's own driving time, the same time the 2-hour limit counts,
+  not time on the clock: waits do not move it, so a dip read during a long wait still
+  counts until an hour of driving has passed since. A sensor flickering between two
+  adjacent values does neither while its lower value comes back within each hour of
+  driving. A reading held steady for over an hour of driving and then one step lower
+  does count as a new low: a stalled room that read 45 °F, and nothing lower, through
+  its last hour of driving is armed again when it reads 44 °F. A real but
   slow room cycles: 2 hours on, stalled until it falls another degree, on again, with a
   notice each time. A stuck sensor stays `blind` after one notice (one more after
   each Home Assistant restart).
@@ -1255,11 +1275,11 @@ a lost or stale sensor, gives up after 2 hours of running without progress, and 
 touches anything but that room's own head. Each of those sends a notice through
 **Notify on drift**, or, with none set, a Home Assistant notification; at most one an
 hour per room. During a run, changing only the head's setpoint does not stop it: MXZ
-puts its run's setpoint back at the next update. If someone was already heating a room
-run from its own remote, MXZ keeps their setpoint when it is warmer than the clear
-line's and gives them their own heat back at the end; a hand-back that lands during an
-`eco` standby hold is dropped, the head is turned off, and their heat does not come
-back when the hold ends. See
+puts its run's setpoint back at the next update, even over a raise. If someone was
+already heating a room run from its own remote, MXZ keeps their setpoint when it is
+warmer than the clear line's and gives them their own heat back at the end; a
+hand-back that lands during an `eco` standby hold is dropped, the head is turned off,
+and their heat does not come back when the hold ends. See
 [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling).
 
 </details>
