@@ -55,7 +55,8 @@ an install with no floor set, `mode_by_floor` is always false and every room's
 `floor_state` is `none`.
 
 A room's enable switch keeps a floor run (and a hands-off room's stand-down after a
-person's change) in its restore data, beside `hands_off_released`, only while one
+person's change, and the mode and setpoints of a person's own run that the floor took
+over, `floor_prior`) in its restore data, beside `hands_off_released`, only while one
 exists. A room with no floor stores exactly what it stored before these settings
 existed.
 

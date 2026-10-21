@@ -517,6 +517,170 @@ async def test_d5_hands_off_floor_takes_the_head_and_hands_back_off(hass: HomeAs
     assert (_s(hass, f.b), sent) == ("cool", ["heat", "off", "cool"])
 
 
+async def _person_sets(hass: HomeAssistant, head: str, mode: str, low: float, high: float) -> None:
+    """A person sets the head's mode and setpoints themselves (remote, app)."""
+    await hass.services.async_call(
+        "climate", "set_temperature",
+        {"entity_id": head, "hvac_mode": mode, "target_temp_low": low, "target_temp_high": high},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+
+def _run(hass: HomeAssistant, head: str) -> tuple[str, Any, Any]:
+    state = hass.states.get(head)
+    return (state.state, state.attributes["target_temp_low"], state.attributes["target_temp_high"])
+
+
+async def _persons_heat_then_trip(f: Floor, mode: str = "heat", low: float = 66, high: float = 68):
+    """The hands-off guest room is released and its person runs the head
+    themselves; then the room trips its floor (45 °F) or ceiling (92 °F)."""
+    await f.compute()
+    assert f.zone(1)["hands_off"] == "released"
+    await _person_sets(f.hass, f.b, mode, low, high)
+    await f.compute()
+    assert f.zone(1)["hands_off_vote"] == mode
+    sent = _mode_commands(f.hass, f.b)
+    await f.temp(SENSOR_B, 45 if mode == "heat" else 92)
+    assert (f.zone(1)["hands_off"], f.zone(1)["hands_off_vote"]) == ("floor", None)
+    return sent
+
+
+@pytest.mark.parametrize(
+    ("mode", "theirs", "ours", "clear"),
+    [("heat", (66, 68), (59, 61), 53), ("cool", (72, 74), (85, 87), 87)],
+    ids=["floor", "ceiling"],
+)
+async def test_p3_a_persons_own_run_is_handed_back_in_their_mode_at_clear(
+    hass: HomeAssistant, mode, theirs, ours, clear
+) -> None:
+    """P3: the person was already heating the hands-off guest room at 66/68
+    when it fell below its floor. MXZ runs it at the clear line (59/61), and
+    at clear gives it back in heat at 66/68, never off; the room is theirs
+    again at once (released, their heat is a vote). The hand-back is sent
+    once: a later change by the person is left alone. Mirror: a person
+    cooling at 72/74 gets cool at 72/74 back after a ceiling run."""
+    f = await _setup(hass, hands_off=(False, True))
+    sent = await _persons_heat_then_trip(f, mode, *theirs)
+    assert _run(hass, f.b) == (mode, *ours)
+    await f.temp(SENSOR_B, clear)
+    assert _run(hass, f.b) == (mode, *theirs)
+    assert sent == [mode, mode]
+    assert (f.zone(1)["hands_off"], f.zone(1)["hands_off_vote"]) == ("released", mode)
+    assert f.floor(1)[0] == "armed"
+    await _person_sets(hass, f.b, mode, theirs[0] - 2, theirs[1] - 2)
+    for _ in range(2):
+        await f.compute()
+    assert _run(hass, f.b) == (mode, theirs[0] - 2, theirs[1] - 2)
+    assert sent == [mode, mode, mode]  # the third is the person's own
+
+
+@pytest.mark.parametrize("before", ["cool", "fan_only"])
+async def test_p3_a_run_mxz_started_from_another_mode_still_hands_back_off(
+    hass: HomeAssistant, before: str
+) -> None:
+    """P3 / decision 5: the person was running the head in another mode
+    (cool, or fan only) when the floor tripped, so the heat was MXZ's own:
+    at clear the head goes off, as decision 5 says (from off: test_d5)."""
+    f = await _setup(hass, hands_off=(False, True))
+    await f.compute()
+    await _remote(hass, f.b, before)
+    await f.compute()
+    sent = _mode_commands(hass, f.b)
+    await f.temp(SENSOR_B, 45)
+    assert _s(hass, f.b) == "heat"
+    await f.temp(SENSOR_B, 53)
+    assert (_s(hass, f.b), sent) == ("off", ["heat", "off"])
+    assert "secondary" not in f.coord._floor_prior
+
+
+async def test_p3_the_persons_run_survives_a_restart_mid_run(hass: HomeAssistant) -> None:
+    """P3, restore-state continuity: the remembered heat at 66/68 is kept in
+    the enable switch's restore data during the run, so after a restart the
+    clear still hands the head back in heat at 66/68."""
+    f = await _setup(hass, hands_off=(False, True))
+    await _persons_heat_then_trip(f)
+    await _shutdown(hass, f.entry)
+    stored = rs.async_get(hass).last_states[_eid(hass, f.entry, "_secondary_enable")]
+    assert stored.extra_data.as_dict()["floor_prior"] == {"mode": "heat", "low": 66, "high": 68}
+    await _startup(hass, f.entry)
+    await f.compute()
+    assert (f.zone(1)["hands_off"], f.zone(1)["hands_off_vote"]) == ("floor", None)
+    assert _run(hass, f.b) == ("heat", 59, 61)
+    await f.temp(SENSOR_B, 53)
+    assert _run(hass, f.b) == ("heat", 66, 68)
+    assert f.zone(1)["hands_off"] == "released"
+
+
+async def test_p3_a_hand_back_that_cannot_be_sent_is_not_sent_later(hass: HomeAssistant) -> None:
+    """P3, the documented edge: Coordinator is off when the room clears, so
+    MXZ sends nothing and the head keeps its last command (heat 59/61). The
+    room is the person's again; turning Coordinator back on does not send the
+    old hand-back over whatever they have done since."""
+    f = await _setup(hass, hands_off=(False, True))
+    sent = await _persons_heat_then_trip(f)
+    await f.switch("_coordinator_enable", False)
+    await f.temp(SENSOR_B, 53)
+    assert (_run(hass, f.b), sent) == (("heat", 59, 61), ["heat"])
+    assert f.zone(1)["hands_off"] == "released"
+    await f.switch("_coordinator_enable", True)
+    for _ in range(2):
+        await f.compute()
+    assert (_run(hass, f.b), sent) == (("heat", 59, 61), ["heat"])
+
+
+async def test_p3_a_yield_drops_the_persons_earlier_run(hass: HomeAssistant) -> None:
+    """P3 / decision 8(b): the person changes the head during the run (off):
+    that is the newer wish. The earlier heat is forgotten, not kept in the
+    restore data, and nothing is sent when the room later clears."""
+    f = await _setup(hass, hands_off=(False, True))
+    await _persons_heat_then_trip(f)
+    await _remote(hass, f.b, "off")
+    await f.compute()
+    assert f.floor(1)[0] == "yielded"
+    assert "floor_prior" not in f.coord.floor_record("secondary")
+    sent = _mode_commands(hass, f.b)
+    await f.temp(SENSOR_B, 53)
+    for _ in range(2):
+        await f.compute()
+    assert (_s(hass, f.b), sent, f.floor(1)[0]) == ("off", [], "armed")
+
+
+async def test_p3_a_run_that_ends_blind_also_hands_back_the_persons_heat(hass: HomeAssistant) -> None:
+    """P3 at a blind end: the sensor drops out mid-run. The run ends at once
+    (decision 4), and the person's own heat at 66/68 is handed back rather
+    than the head being turned off in a cold room."""
+    f = await _setup(hass, hands_off=(False, True))
+    sent = await _persons_heat_then_trip(f)
+    hass.states.async_set(SENSOR_B, "unavailable")
+    await hass.async_block_till_done()
+    await f.compute()
+    assert f.floor(1)[0] == "blind"
+    assert _run(hass, f.b) == ("heat", 66, 68)
+    assert "off" not in sent
+    assert (f.zone(1)["hands_off"], f.zone(1)["hands_off_vote"]) == ("released", "heat")
+
+
+async def test_p3_a_stalled_run_hands_back_and_a_rearm_takes_it_again(
+    hass: HomeAssistant, freezer
+) -> None:
+    """P3 with decision 11: a run that stalls hands the person's heat back
+    (66/68), not off. A new low re-arms it: MXZ takes the head over again
+    from that same heat (59/61), and the next clear hands it back again."""
+    f = await _setup(hass, hands_off=(False, True))
+    sent = await _persons_heat_then_trip(f)
+    await _tick(hass, freezer, 2 * HOUR + timedelta(seconds=5))
+    await f.compute()
+    assert f.floor(1)[0] == "blind"
+    assert _run(hass, f.b) == ("heat", 66, 68)
+    assert f.zone(1)["hands_off"] == "released"
+    await f.temp(SENSOR_B, 44)
+    assert (f.floor(1)[0], _run(hass, f.b)) == ("heat", ("heat", 59, 61))
+    await f.temp(SENSOR_B, 53)
+    assert _run(hass, f.b) == ("heat", 66, 68)
+    assert "off" not in sent
+
+
 # ---------------------------------------------------------------------------
 # Decision 6: freeze first; same kind by room order
 # ---------------------------------------------------------------------------

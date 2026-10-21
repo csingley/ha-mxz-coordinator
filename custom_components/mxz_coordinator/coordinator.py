@@ -554,6 +554,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._floor_eval_ts: dict[str, float] = {}
         self._floor_yield: dict[str, tuple[str, float]] = {}
         self._floor_view: dict[str, tuple[str, str | None]] = {}
+        # A hands-off run MXZ took over from a person already running the
+        # head in the floor's direction: their (mode, low, high), given back
+        # when the run ends (P3); and a hand-back for the next apply to send.
+        self._floor_prior: dict[str, tuple[str, float, float]] = {}
+        self._floor_handback: dict[str, tuple[str, float, float]] = {}
         # One notice per episode: a blind room, a rejected floor command.
         self._floor_blind_noticed: set[str] = set()
         self._floor_reject_noticed: set[str] = set()
@@ -1715,6 +1720,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         was computed; the writeback at the end skips itself if a person has
         asked for a direction since.
         """
+        # A hand-back (P3) is for this apply only: one skipped (Coordinator
+        # off, a standby park, no plan yet) leaves the head as MXZ left it.
+        handbacks, self._floor_handback = self._floor_handback, {}
         if self._retired:
             return
         if not self.coordinator_enable:
@@ -1752,6 +1760,16 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # (Any standby hold, eco included, holds it off like any
                 # disabled room: the fixed parks never reach here.)
                 if zone.slug in self._hands_off_released:
+                    head = self.hass.states.get(zone.climate_id)
+                    back = handbacks.get(zone.slug)
+                    if back is not None and head is not None and (
+                        head.state not in UNAVAILABLE_STATES
+                    ):
+                        # A floor run ended on a head a person was already
+                        # running that way: theirs again, as they had it (P3).
+                        task = self._queue_delivery(zone.climate_id, *back)
+                        if task is not None:
+                            tasks.append(task)
                     continue  # its off landed: the head is someone else's now
                 head = self.hass.states.get(zone.climate_id)
                 if (
@@ -3526,14 +3544,14 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         head = self.hass.states.get(zone.climate_id)
         if not ok:
-            self._floor_end(slug)
+            self._floor_end(slug, hand_back=True)
             self._floor_blind(
                 zone, "Room sensor unavailable, invalid or stale: no floor "
                 "protection until it reports a usable reading."
             )
             return None
         if head is None or head.state in UNAVAILABLE_STATES:
-            self._floor_end(slug)
+            self._floor_end(slug, hand_back=True)
             self._floor_blind(
                 zone, f"Head {zone.climate_id} unavailable: no floor protection "
                 "until it reports again."
@@ -3568,7 +3586,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             margin=self._floor_margin,
         )
         if run is not None and want != run.direction:
-            self._floor_end(slug)  # cleared (or crossed straight to the other trip)
+            # Cleared (or crossed straight to the other trip).
+            self._floor_end(slug, hand_back=True)
             run = None
         if run is None:
             if want is None:
@@ -3581,6 +3600,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._floor_notify_trip(zone, run.direction, temp)  # a new low re-armed it
         self._floor_runs[slug] = run
         if run.stalled:
+            self._floor_hand_back(slug)
             step = f"{self.target_step:g} {self._unit_symbol()}"
             self._floor_blind(
                 zone, f"Stalled: {FLOOR_STALL_SECONDS // 3600} h of driving the head "
@@ -3591,7 +3611,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         self._floor_blind_noticed.discard(slug)
         if zone.hands_off:
-            # The run is MXZ's: the room parks again when it ends (decision 5).
+            # The run is MXZ's: the room parks again when it ends (decision 5),
+            # unless MXZ took the head over a person's own run that way (P3).
+            if slug in self._hands_off_released:
+                self._floor_take_over(zone, run.direction, head)
             self._hands_off_released.discard(slug)
         self._floor_view[slug] = (run.direction, None)  # settled after arbitration
         return run.direction
@@ -3622,11 +3645,48 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             self._floor_view[zone.slug] = ("held", reason)
 
-    def _floor_end(self, slug: str) -> None:
-        """End this room's run, if any (a hands-off room then parks)."""
+    def _floor_end(self, slug: str, *, hand_back: bool = False) -> None:
+        """End this room's run, if any. A hands-off room then parks
+        (decision 5), unless ``hand_back`` and the run was taken over from a
+        person: see :meth:`_floor_hand_back`. Without ``hand_back`` (the room
+        was enabled, the floor removed, a person changed the head) the
+        person's earlier run is forgotten."""
         self._floor_runs.pop(slug, None)
         self._floor_reject_noticed.discard(slug)
         self._floor_rejecting.pop(slug, None)
+        if hand_back:
+            self._floor_hand_back(slug)
+        else:
+            self._floor_prior.pop(slug, None)
+
+    def _floor_take_over(self, zone: Zone, direction: str, head: Any) -> None:
+        """A hands-off run starts on a released room. If the person is
+        running the head in the floor's direction already, remember their
+        mode and setpoint to give back (P3). A head with no setpoint to read
+        gets the clear line's."""
+        if head.state != direction:
+            return  # off, another mode: decision 5 (back to off)
+        if int(head.attributes.get("supported_features") or 0) & 2:
+            low = _as_float(head.attributes.get("target_temp_low"))
+            high = _as_float(head.attributes.get("target_temp_high"))
+        else:
+            low = high = _as_float(head.attributes.get("temperature"))
+        if low is None or high is None:
+            low, high = setpoints(
+                mode=direction, target=self._floor_clear(zone, direction), eco=False,
+                clamp_min=self.clamp_min, clamp_max=self.clamp_max,
+                band=self.setpoint_band, step=self.target_step,
+            )
+        self._floor_prior[zone.slug] = (direction, low, high)
+
+    def _floor_hand_back(self, slug: str) -> None:
+        """A hands-off run that MXZ took over from a person's own run in the
+        floor's direction ended without that person changing the head
+        (cleared, blind or stalled): it is theirs again at once, and the next
+        apply sends it their mode and setpoint, never off (P3)."""
+        if (prior := self._floor_prior.pop(slug, None)) is not None:
+            self._hands_off_released.add(slug)
+            self._floor_handback[slug] = prior
 
     def _floor_blind(self, zone: Zone, reason: str, kind: str = "blind") -> None:
         """Show the room ``blind``; notify once per episode (decision 7).
@@ -3765,7 +3825,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         run = self._floor_runs.get(zone.slug)
         if run is None:
             return
-        self._floor_end(zone.slug)
+        self._floor_end(zone.slug)  # their earlier run is not handed back
         self._floor_yield[zone.slug] = (run.direction, now)
         self._hands_off_released.add(zone.slug)
         _LOGGER.info(
@@ -3785,6 +3845,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "direction": run.direction, "mark": run.mark, "worst": run.worst,
                 "driven": run.driven, "stalled": run.stalled,
             }
+        if (prior := self._floor_prior.get(slug)) is not None:
+            record["floor_prior"] = {"mode": prior[0], "low": prior[1], "high": prior[2]}
         if (yielded := self._floor_yield.get(slug)) is not None:
             record["floor_yield"] = {"direction": yielded[0], "at": yielded[1]}
         return record
@@ -3815,6 +3877,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     direction=run["direction"], mark=mark, worst=worst,
                     driven=max(driven, 0.0), stalled=run["stalled"],
                 )
+                prior = data.get("floor_prior")
+                if isinstance(prior, dict) and prior.get("mode") == run["direction"]:
+                    low, high = _finite(prior.get("low")), _finite(prior.get("high"))
+                    if low is not None and high is not None:
+                        self._floor_prior[slug] = (run["direction"], low, high)
         yielded = data.get("floor_yield")
         if isinstance(yielded, dict) and configured(yielded.get("direction")):
             since = _finite(yielded.get("at"))

@@ -855,6 +855,16 @@ What it does:
 - **It hands back with the head off.** A held-off room goes back to being held off. A
   room run from its own remote is parked off and then left alone again, as when you
   first disable it; MXZ's own heat or cool never counts as that room's vote.
+- **Unless someone was already running it that way.** If a person was running a room
+  run from its own remote in the floor's direction when it tripped (heat for a freeze
+  floor, cool for an overheat ceiling), MXZ gives the head back in that mode, at the
+  setpoint they had, when the run ends: the room clears, its sensor or head is lost,
+  or the run stalls. The room is theirs again at once. What they had survives a Home
+  Assistant restart during the run. If they change the head during the run, MXZ
+  stands down (below) and forgets their earlier setting. A run MXZ started from `off`
+  or from another mode still hands back with the head off. The hand-back is sent once,
+  and not later if it could not be sent then: with Coordinator off the head keeps what
+  it last had, and a standby hold holds it as it holds any such head.
 - **A person at the head.** On a held-off room, MXZ puts its heat or cool back at the
   next room-sensor report or the 15-minute check. On a room run from its own remote,
   changing the head during a run hands it to that person at once: MXZ stands down
