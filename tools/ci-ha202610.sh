@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Additional exact target only; the original three-lane workflow stays separate.
 set -euo pipefail
-mode=${1:?setup, checks, sentinel, suite or export required}
+mode=${1:?setup, checks, sentinel, suite, fakeboot or export required}
 [[ ${GITHUB_RUN_ID:-} =~ ^[0-9]+$ ]]
 test "${GITHUB_RUN_ATTEMPT:-}" = 1 || { test "${GITHUB_RUN_ATTEMPT:-}" = 2 && test "${GITHUB_EVENT_NAME:-}" = pull_request && test "${APPROVAL_ADMITTED:-}" = true; }
 [[ ${GITHUB_SHA:-} =~ ^[0-9a-f]{40}$ ]]
@@ -45,6 +45,15 @@ case "$mode" in
     timeout --signal=TERM --kill-after=5s "${args[0]}" "$python" -m pytest \
       -p tools.pytest_phases "${args[1]}" -q -s -p no:cacheprovider > "$root/$mode.log" 2>&1 || result=$?
     printf '%s\n' "$result" > "$root/$mode.exit"
+    exit "$result"
+    ;;
+  fakeboot)
+    # The full suite again on a clock that reads as if the runner had booted
+    # two minutes ago (tools/fakeboot.py), with the same phases and limit.
+    result=0
+    FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 180s "$python" -m pytest \
+      -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider > "$root/fakeboot.log" 2>&1 || result=$?
+    printf '%s\n' "$result" > "$root/fakeboot.exit"
     exit "$result"
     ;;
   export)

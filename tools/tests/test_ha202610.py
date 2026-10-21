@@ -249,3 +249,107 @@ def test_foreign_interpreter_refused_before_install(tmp_path):
     wrapper.write_text("#!/bin/sh\nexec /invented/private/python \"$@\"\n")
     with pytest.raises(ValueError, match="wrong owned Python wrapper"):
         lane.check_runtime_wrapper(tmp_path, lane.load_bundle())
+
+
+FRESH_BOOT_STEP = {"name": "Full suite on a fresh-boot clock", "if": "${{ !cancelled() }}",
+                   "run": "bash tools/ci-ha202610.sh fakeboot"}
+
+
+def test_fresh_boot_pass_follows_the_suite_and_precedes_the_export():
+    steps = workflow()["jobs"]["exact-ha202610"]["steps"]
+    names = [step.get("name") for step in steps]
+    assert names.count(FRESH_BOOT_STEP["name"]) == 1
+    fresh = names.index(FRESH_BOOT_STEP["name"])
+    assert names[fresh - 1] == "Full retained suite with original phases"
+    assert steps[fresh - 1]["run"] == "bash tools/ci-ha202610.sh suite"
+    assert steps[fresh] == FRESH_BOOT_STEP
+    assert fresh == len(steps) - 2 and steps[-1]["run"] == "bash tools/ci-ha202610.sh export"
+
+
+def fakeboot_branch():
+    script = (ROOT / "tools/ci-ha202610.sh").read_text()
+    assert script.count("\n  fakeboot)\n") == 1
+    return script.split("\n  fakeboot)\n", 1)[1].split("\n    ;;\n", 1)[0]
+
+
+def test_fresh_boot_pass_is_the_full_suite_on_the_two_minute_clock():
+    branch = fakeboot_branch()
+    assert ('FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 180s "$python" -m pytest \\\n'
+            '      -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider'
+            ' > "$root/fakeboot.log" 2>&1 || result=$?') in branch
+    assert "printf '%s\\n' \"$result\" > \"$root/fakeboot.exit\"" in branch
+    assert branch.rstrip().endswith('exit "$result"')
+
+
+@pytest.mark.parametrize("status", [0, 1, 2, 124, 137])
+def test_fresh_boot_exit_is_saved_and_returned(tmp_path, status):
+    """Run the script's own fakeboot branch against an invented interpreter that
+    reports its arguments and clock, then exits with ``status``."""
+    stub = tmp_path / "invented-python"
+    stub.write_text('#!/bin/bash\nprintf "ARGV %s\\n" "$*"\nprintf "FAKE_UPTIME=%s\\n" "$FAKE_UPTIME"\n'
+                    f"exit {status}\n")
+    stub.chmod(0o755)
+    root = tmp_path / "invented-root"
+    root.mkdir()
+    result = subprocess.run(["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c",
+                             f'python={stub}; root={root}\n' + fakeboot_branch()],
+                            env={"PATH": os.defpath}, text=True, capture_output=True, check=False, timeout=10)
+    assert result.returncode == status
+    assert (root / "fakeboot.exit").read_text() == f"{status}\n"
+    assert (root / "fakeboot.log").read_text().splitlines() == [
+        "ARGV -m pytest -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider",
+        "FAKE_UPTIME=120"]
+
+
+def test_fresh_boot_clock_line():
+    assert lane.fakeboot_clock_errors("FAKEBOOT_UPTIME=120\n" + phase_fixture()) == []
+
+
+@pytest.mark.parametrize("raw", ["", "FAKEBOOT_UPTIME=86400\n", "FAKEBOOT_UPTIME=120\nFAKEBOOT_UPTIME=120\n",
+                                 "FAKEBOOT_UPTIME=120.0\n", "FAKEBOOT_UPTIME=120 \n"],
+                         ids=["missing", "wrong", "repeated", "reformatted", "trailing"])
+def test_missing_or_wrong_fresh_boot_clock_refused(raw):
+    assert lane.fakeboot_clock_errors(raw + phase_fixture()) == ["missing, repeated or wrong fresh-boot clock"]
+
+
+def export_errors(root, capsys):
+    with pytest.raises(ValueError, match="incomplete evidence export"):
+        lane.export(root, lane.load_bundle())
+    line = [x for x in capsys.readouterr().out.splitlines() if x.startswith("EVIDENCE_ERRORS ")]
+    assert len(line) == 1
+    return json.loads(line[0][len("EVIDENCE_ERRORS "):])
+
+
+@pytest.mark.parametrize("fault", ["none", "no-log", "no-exit", "exit", "phases", "clock", "oversize"])
+def test_export_requires_complete_fresh_boot_evidence(tmp_path, capsys, fault):
+    """Only the fresh-boot files are present, so every error that is not about a
+    missing file of another step is about them."""
+    log, status = "FAKEBOOT_UPTIME=120\n" + phase_fixture(), "0\n"
+    if fault == "exit":
+        status = "1\n"
+    elif fault == "phases":
+        log = log.replace("PHASES_VALID=true", "PHASES_VALID=false")
+    elif fault == "clock":
+        log = log.replace("FAKEBOOT_UPTIME=120", "FAKEBOOT_UPTIME=86400")
+    elif fault == "oversize":
+        log += "x" * (5 * 2**20)
+    if fault != "no-log":
+        (tmp_path / "fakeboot.log").write_text(log)
+    if fault != "no-exit":
+        (tmp_path / "fakeboot.exit").write_text(status)
+    others = {"missing " + name for name in (
+        "source.txt", "source-files.sha256", "runner.txt", "setup.log", "checks.log",
+        "generated-artifact.json", "actual-artifacts.json", "install.lock", "wheel-tags.json",
+        "sentinel.log", "sentinel.exit", "suite.log", "suite.exit")}
+    errors = [e for e in export_errors(tmp_path, capsys)
+              if e not in others and not e.startswith("invalid setup receipt ")]
+    expected = {
+        "none": [],
+        "no-log": ["missing fakeboot.log"],
+        "no-exit": ["missing fakeboot.exit"],
+        "exit": ["nonzero or missing suite exit"],
+        "phases": ["incomplete phase completion"],
+        "clock": ["missing, repeated or wrong fresh-boot clock"],
+        "oversize": ["oversize or symlink " + str(tmp_path / "fakeboot.log")],
+    }[fault]
+    assert errors == expected

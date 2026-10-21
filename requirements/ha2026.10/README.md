@@ -46,7 +46,13 @@ autoload disabled. Ordinary integration tests retain genuine plugin loading:
 ```bash
 timeout --signal=TERM --kill-after=5s 180s "$work/venv/bin/python" -m pytest \
   -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
+FAKE_UPTIME=120 timeout --signal=TERM --kill-after=5s 180s "$work/venv/bin/python" -m pytest \
+  -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
 ```
+
+The second run is the same suite on a clock that reads as if the host had booted
+two minutes ago (`tools/fakeboot.py`); it prints `FAKEBOOT_UPTIME=120` once. The
+hosted qualification runs both and exports both logs.
 
 Do not interpret a collection, import, sentinel, or partial log as a full pass.
 For release qualification, settle the implementation, version, documentation and

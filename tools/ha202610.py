@@ -550,6 +550,12 @@ def phase_log_errors(raw, exit_text):
     return errors
 
 
+def fakeboot_clock_errors(raw):
+    """The fresh-boot pass names its clock once: two minutes since boot."""
+    lines = [line for line in raw.splitlines() if line.startswith("FAKEBOOT_UPTIME=")]
+    return [] if lines == ["FAKEBOOT_UPTIME=120"] else ["missing, repeated or wrong fresh-boot clock"]
+
+
 def export(root, data):
     errors = []
     for label in ("create-venv", "bootstrap-pip", "build-tools", "plugin-identity", "core-identity",
@@ -566,14 +572,17 @@ def export(root, data):
             errors.append("invalid setup receipt " + label + ": " + str(exc))
     for name in ("source.txt", "source-files.sha256", "runner.txt", "setup.log", "checks.log",
                  "generated-artifact.json", "actual-artifacts.json", "install.lock", "wheel-tags.json",
-                 "sentinel.log", "sentinel.exit", "suite.log", "suite.exit"):
+                 "sentinel.log", "sentinel.exit", "suite.log", "suite.exit",
+                 "fakeboot.log", "fakeboot.exit"):
         path = root / name
         if not path.is_file():
             errors.append("missing " + name)
-    for mode in ("sentinel", "suite"):
+    for mode in ("sentinel", "suite", "fakeboot"):
         log, status = root / (mode + ".log"), root / (mode + ".exit")
         if log.is_file() and status.is_file():
             errors.extend(phase_log_errors(log.read_text(), status.read_text()))
+    if (root / "fakeboot.log").is_file():
+        errors.extend(fakeboot_clock_errors((root / "fakeboot.log").read_text()))
     checks = root / "checks.log"
     if checks.is_file():
         errors.extend(phase_log_errors(checks.read_text(), "0\n"))
@@ -581,7 +590,8 @@ def export(root, data):
     paths = [p for p in root.glob("*") if p.is_file()]
     paths += sorted((root / "logs").glob("*/*"))
     for path in sorted(paths):
-        limit = {"suite.log": 5 * 2**20, "sentinel.log": 2**20, "checks.log": 2**20}.get(path.name, 6 * 2**20)
+        limit = {"suite.log": 5 * 2**20, "fakeboot.log": 5 * 2**20, "sentinel.log": 2**20,
+                 "checks.log": 2**20}.get(path.name, 6 * 2**20)
         if path.stat().st_size > limit or path.is_symlink():
             errors.append("oversize or symlink " + str(path))
             continue

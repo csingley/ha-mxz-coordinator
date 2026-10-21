@@ -1480,11 +1480,12 @@ invented entities; it covers software behavior, not physical behavior on equipme
 
 Cutting a release? Follow [docs/RELEASING.md](docs/RELEASING.md).
 
-- The first three locks belong to the existing CI lanes. Each also runs the full suite
-  a second time with `-p tools.fakeboot` and `FAKE_UPTIME=120`, on a clock that reads
-  as if the runner had booted two minutes ago. The mode-change wait is timed on the
+- The first three locks belong to the existing CI lanes. Each lane, and the .10
+  qualification, also runs the full suite a second time with `-p tools.fakeboot` and
+  `FAKE_UPTIME=120`, on a clock that reads as if the runner had booted two minutes ago.
+  The mode-change wait, the coil-dry wait and the floor's own clocks are timed on the
   monotonic clock, which counts from boot, so a test that only passes on a long-running
-  host fails there. The .10 qualification does not run this second pass.
+  host fails there.
 - The .10 recipe uses public immutable core/plugin inputs, a pinned Python archive and
   actual locally built artifact hashes. Public plugin `0.13.370` requires beta4;
   installing it by version alone does not reproduce the stable .10 environment.
