@@ -10,10 +10,13 @@ A release is cut by hand, in this order. Don't tag until every step above the ta
 
    ```bash
    python -m pytest -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
+   FAKE_UPTIME=120 python -m pytest -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider
    ruff check --no-cache custom_components/ tests/ tools/
    ```
 
-   The suite must end `PHASES_VALID=true` with exit 0, and ruff must report no errors.
+   Both suite runs must end `PHASES_VALID=true` with exit 0, and ruff must report no
+   errors. The second runs on a clock that reads as if the host had booted 120 s ago
+   (`tools/fakeboot.py`) and prints `FAKEBOOT_UPTIME=120` once.
    CI pins `ruff==0.16.0`.
 3. **CI green on main.** Push the release commit to `main` and wait until every job in
    `CI` and `HA 2026.10 qualification` passes on that exact commit.
