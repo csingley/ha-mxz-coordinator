@@ -59,6 +59,14 @@ person's change) in its restore data, beside `hands_off_released`, only while on
 exists. A room with no floor stores exactly what it stored before these settings
 existed.
 
+Floor notices go to **Notify on drift**. With no notification service set they are
+Home Assistant notifications (`persistent_notification.create`) with the id
+`mxz_coordinator_<entry id>_floor_<room key>_<kind>`, where the room key is, for
+example, `secondary` and `<kind>` is `trip`, `blind`, `stalled` or `rejected`, so a
+repeat replaces the last. At most one floor notice goes out per room per hour; one
+held back is logged as a warning. Nothing about notices is stored, so a restart starts
+the hour afresh.
+
 See [Freeze floor and overheat ceiling](../README.md#freeze-floor-and-overheat-ceiling).
 
 ## Run one room from its own remote (3.6.0)

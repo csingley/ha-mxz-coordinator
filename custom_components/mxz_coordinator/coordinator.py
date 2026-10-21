@@ -95,6 +95,7 @@ from .const import (
     EVIDENCE_HA_WRITE,
     FAN_AUTO,
     FAN_LADDER,
+    FLOOR_NOTICE_SECONDS,
     FLOOR_STALL_SECONDS,
     FLOOR_YIELD_SECONDS,
     HEALTH_AWAITING,
@@ -556,6 +557,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # One notice per episode: a blind room, a rejected floor command.
         self._floor_blind_noticed: set[str] = set()
         self._floor_reject_noticed: set[str] = set()
+        # The rate limit (P5): when each room's last floor notice went out,
+        # and the notices held back since (each logged once). In memory only.
+        self._floor_notice_at: dict[str, float] = {}
+        self._floor_held_back: dict[str, set[str]] = {}
         # A head that rejected MXZ's floor command and has accepted none
         # since: its error. The plan then shows held, not heat/cool.
         self._floor_rejecting: dict[str, str] = {}
@@ -3581,6 +3586,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 zone, f"Stalled: {FLOOR_STALL_SECONDS // 3600} h of driving the head "
                 f"without {step} of progress. Re-arms when the room reaches its "
                 f"clear line or a new {'low' if run.direction == MODE_HEAT else 'high'}.",
+                kind="stalled",
             )
             return None
         self._floor_blind_noticed.discard(slug)
@@ -3622,19 +3628,23 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._floor_reject_noticed.discard(slug)
         self._floor_rejecting.pop(slug, None)
 
-    def _floor_blind(self, zone: Zone, reason: str) -> None:
+    def _floor_blind(self, zone: Zone, reason: str, kind: str = "blind") -> None:
         """Show the room ``blind``; notify once per episode (decision 7).
 
         A configured room can be blind before anything tripped: it has no
         protection either way. While Home Assistant starts, an unusable sensor
         or head may only be loading, so the notice waits for the post-start
-        recompute, which sends it if the room is still blind.
+        recompute, which sends it if the room is still blind. A notice the
+        rate limit holds back is tried again at each compute while the room
+        stays blind, so it goes out once the hour is up.
         """
         self._floor_view[zone.slug] = ("blind", reason)
         if zone.slug in self._floor_blind_noticed or self._startup_quiet:
             return
-        self._floor_blind_noticed.add(zone.slug)
-        self._floor_send(f"{zone.name}: the freeze/overheat floor is blind. {reason}")
+        if self._floor_send(
+            zone, kind, f"{zone.name}: the freeze/overheat floor is blind. {reason}"
+        ):
+            self._floor_blind_noticed.add(zone.slug)
 
     def _floor_notify_trip(self, zone: Zone, direction: str, temp: float) -> None:
         unit = self._unit_symbol()
@@ -3645,6 +3655,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             what = f"above its overheat ceiling of {zone.floor_high:g} {unit}"
             act = "cooling"
         self._floor_send(
+            zone, "trip",
             f"{zone.name} is at {temp:g} {unit}, {what}. MXZ is {act} this disabled "
             f"room until it reaches {self._floor_clear(zone, direction):g} {unit}."
         )
@@ -3664,7 +3675,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _floor_rejected(self, climate_id: str, err: Exception) -> None:
         """A command to a head whose floor is tripped was rejected: the plan
         shows it held (republished as the delivery ends), and it is notified
-        once per run (decision 7); the next ordinary update tries again."""
+        once per run (decision 7); the next ordinary update tries again. A
+        notice the rate limit holds back goes out at the first rejection
+        after the hour is up."""
         for zone in self.zones:
             if (
                 zone.climate_id == climate_id
@@ -3674,11 +3687,12 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._floor_rejecting[zone.slug] = str(err)
                 if zone.slug in self._floor_reject_noticed:
                     continue
-                self._floor_reject_noticed.add(zone.slug)
-                self._floor_send(
+                if self._floor_send(
+                    zone, "rejected",
                     f"{zone.name}: the floor's command to {climate_id} was rejected "
-                    f"({err}). MXZ keeps trying at each update."
-                )
+                    f"({err}). MXZ keeps trying at each update.",
+                ):
+                    self._floor_reject_noticed.add(zone.slug)
 
     def _floor_accepted(self, climate_id: str) -> None:
         """A command to this head returned (or was not needed): it is no
@@ -3687,20 +3701,57 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if zone.climate_id == climate_id:
                 self._floor_rejecting.pop(zone.slug, None)
 
-    def _floor_send(self, message: str) -> None:
-        """Log one floor notice and send it through the integration's
-        notification service (nothing is sent when none is configured)."""
+    def _floor_send(self, zone: Zone, kind: str, message: str) -> bool:
+        """Log one floor notice and send it; return whether it went out.
+
+        At most one floor notice per room per hour, whatever its kind (trip,
+        blind, stalled, rejected), so a flapping sensor or head cannot flood
+        anyone (P5). A held-back notice is logged at WARNING, once, saying so.
+        It goes to the integration's notification service; with none set (or
+        one that names no service) it becomes a Home Assistant notification
+        instead (P2), one per room and kind, so a repeat replaces the last.
+        """
+        slug = zone.slug
+        now = dt_util.utcnow().timestamp()
+        last = self._floor_notice_at.get(slug)
+        if last is not None and now - last < FLOOR_NOTICE_SECONDS:
+            held = self._floor_held_back.setdefault(slug, set())
+            if message not in held:
+                held.add(message)
+                _LOGGER.warning(
+                    "MXZ floor: %s (not sent: rate-limited to one floor notice "
+                    "per room per hour)", message,
+                )
+            return False
         _LOGGER.warning("MXZ floor: %s", message)
         if self._retired:
-            return
+            return False
+        self._floor_notice_at[slug] = now
+        self._floor_held_back.pop(slug, None)
+        domain, _, service = (self.notify_service or "").partition(".")
 
         async def _send() -> None:
             try:
-                await self._notify(message)
+                if domain and service:
+                    await self._notify(message)
+                    return
+                await self.hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "title": "HVAC Update",
+                        "message": message,
+                        "notification_id": (
+                            f"{DOMAIN}_{self.config_entry.entry_id}_floor_{slug}_{kind}"
+                        ),
+                    },
+                    blocking=False,
+                )
             except HomeAssistantError as err:
                 _LOGGER.error("MXZ floor: the notice could not be sent: %s", err)
 
         self.hass.async_create_task(_send())
+        return True
 
     def _unit_symbol(self) -> str:
         return "°C" if self.celsius else "°F"

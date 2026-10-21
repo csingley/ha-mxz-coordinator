@@ -867,10 +867,20 @@ What it does:
   a head it was running keeps its last command.
 - **Notices.** MXZ notifies when a floor trips, when it cannot protect the room
   (`blind`, below) and when a head rejects a floor command, through the service you
-  set as **Notify on drift**. Nothing is sent when the room clears. With no
-  notification service set, nothing is sent; the plan still shows the state.
+  set as **Notify on drift**. With no notification service set, each notice appears
+  in Home Assistant's own notifications instead, one per room and kind (trip, blind,
+  stalled, rejected), so a repeat replaces the last one rather than piling up.
+  Nothing is sent when the room clears. Every notice is also written to the Home
+  Assistant log as a warning.
+- **At most one notice per room per hour**, whatever its kind, so a flapping sensor
+  or head cannot flood you. A notice held back is still logged as a warning that says
+  it was rate-limited. A held-back blind, stalled or rejected notice goes out at the
+  first update after the hour if the room is still in that state; a held-back trip
+  notice is not sent later. The plan always shows the current state.
 - **Restarts.** A run in progress, with its progress record, survives a Home Assistant
-  restart. Time Home Assistant is down does not count toward the 2-hour limit.
+  restart. Time Home Assistant is down does not count toward the 2-hour limit. Which
+  notices were sent, and the hourly limit, are kept only in memory: after a restart a
+  room that is still stalled or blind notifies once more. That repeat is accepted.
 
 When it does not act (fail safe):
 

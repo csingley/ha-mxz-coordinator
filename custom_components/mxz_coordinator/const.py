@@ -99,6 +99,8 @@ FLOOR_STALL_SECONDS = 2 * 3600
 # A hands-off room that yielded a run to a person re-arms after this long
 # (or once the room reaches the clear line).
 FLOOR_YIELD_SECONDS = 4 * 3600
+# At most one floor notice per room in this long, whatever the kind (P5).
+FLOOR_NOTICE_SECONDS = 3600
 EVIDENCE_UNKNOWN = "unknown"
 EVIDENCE_HA_WRITE = "ha_state_write"
 EVIDENCE_SAMPLE_TIMESTAMP = "sample_timestamp"

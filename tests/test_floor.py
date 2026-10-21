@@ -76,8 +76,11 @@ HOUR = timedelta(hours=1)
 class Floor:
     """One set-up entry: its heads, notices and plan, read back as plain data."""
 
-    def __init__(self, hass: HomeAssistant, entry: MockConfigEntry, a: str, b: str, notes) -> None:
+    def __init__(
+        self, hass: HomeAssistant, entry: MockConfigEntry, a: str, b: str, notes, pinned
+    ) -> None:
         self.hass, self.entry, self.a, self.b, self._notes = hass, entry, a, b, notes
+        self._pinned = pinned
 
     @property
     def coord(self):
@@ -97,6 +100,11 @@ class Floor:
     @property
     def notes(self) -> list[str]:
         return [call.data["message"] for call in self._notes]
+
+    @property
+    def pinned(self) -> list[tuple[str, str]]:
+        """Home Assistant notifications created: (notification_id, message)."""
+        return [(call.data["notification_id"], call.data["message"]) for call in self._pinned]
 
     async def temp(self, sensor: str, value: float) -> None:
         await _set_temp(self.hass, sensor, value)
@@ -118,6 +126,7 @@ async def _setup(
     enable: tuple[str, ...] = ("_primary_enable", "_coordinator_enable"),
     hysteresis: int | None = 0,
     notify: bool = True,
+    pin_real: bool = False,
     metric: bool = False,
     zone_extra: tuple[dict, dict] = ({}, {}),
     temps: tuple[float, float] | None = None,
@@ -131,6 +140,9 @@ async def _setup(
     for sensor, value in zip((SENSOR_A, SENSOR_B), temps or (target, target)):
         await _set_temp(hass, sensor, value)
     calls = async_mock_service(hass, "notify", "floor_test")
+    # Home Assistant notifications are recorded, unless the test runs the
+    # real component to read back what a person would see.
+    pinned = [] if pin_real else async_mock_service(hass, "persistent_notification", "create")
     zones = []
     for name, head, sensor, (low, high), opted, more in zip(
         ("Primary", "Guest room"), (head_a, head_b), (SENSOR_A, SENSOR_B), floors,
@@ -158,7 +170,7 @@ async def _setup(
     for suffix in ("_primary_target", "_secondary_target"):
         await _set_target(hass, _eid(hass, entry, suffix), target)
     await _recompute(hass, entry)
-    return Floor(hass, entry, head_a, head_b, calls)
+    return Floor(hass, entry, head_a, head_b, calls, pinned)
 
 
 def _fan_calls(hass: HomeAssistant) -> list[tuple[str, str]]:
@@ -374,13 +386,17 @@ async def test_d3_fixed_holds_stop_the_floor(hass: HomeAssistant, action: str, p
 # Decision 4 and fail safe: no usable reading, no action
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("bad", ["unavailable", "unknown", "missing", "not_a_number"])
-async def test_d4_sensor_lost_mid_run_ends_it_now_as_blind(hass: HomeAssistant, bad: str) -> None:
+async def test_d4_sensor_lost_mid_run_ends_it_now_as_blind(
+    hass: HomeAssistant, freezer, bad: str
+) -> None:
     """Decision 4: a sensor lost mid-run ends the run in that compute (head
     off, no want) and shows blind with one notice; when it reports again
-    below the floor, a new run trips."""
+    below the floor, a new run trips. (Events an hour apart: the notice rate
+    limit, P5, is tested on its own below.)"""
     f = await _setup(hass)
     await f.temp(SENSOR_B, 45)
     assert _s(hass, f.b) == "heat"
+    await _tick(hass, freezer, HOUR)
     if bad == "missing":
         hass.states.async_remove(SENSOR_B)
     else:
@@ -395,6 +411,9 @@ async def test_d4_sensor_lost_mid_run_ends_it_now_as_blind(hass: HomeAssistant, 
     assert len(f.notes) == 2 and "blind" in f.notes[1]
     await f.compute()
     assert len(f.notes) == 2  # one notice per episode
+    await _tick(hass, freezer, HOUR)
+    await f.compute()
+    assert len(f.notes) == 2  # still one, an hour on
     await f.temp(SENSOR_B, 46)
     assert (_s(hass, f.b), f.floor(1)[0], len(f.notes)) == ("heat", "heat", 3)
 
@@ -442,14 +461,16 @@ async def test_fail_safe_stale_mid_run_ends_it(hass: HomeAssistant, freezer) -> 
     assert (_s(hass, f.b), f.floor(1)[0]) == ("off", "blind")
 
 
-async def test_d4_head_unavailable_is_blind_with_no_want(hass: HomeAssistant) -> None:
+async def test_d4_head_unavailable_is_blind_with_no_want(hass: HomeAssistant, freezer) -> None:
     """Decision 4 / design: a tripped room whose head goes unavailable casts no
     want (the enabled room's cool takes the mode back), shows blind with the
-    head named, and notifies; the head returning trips a new run."""
+    head named, and notifies (an hour after the trip notice, past the rate
+    limit); the head returning trips a new run."""
     f = await _setup(hass)
     await f.temp(SENSOR_A, 76)
     await f.temp(SENSOR_B, 45)
     assert (f.plan.state, _s(hass, f.b)) == ("heat", "heat")
+    await _tick(hass, freezer, HOUR)
     head = _head(hass, f.b)
     head._attr_available = False
     head.async_write_ha_state()
@@ -546,9 +567,11 @@ async def test_d6_ranking_vs_a_safety_priority_room(hass: HomeAssistant) -> None
 # ---------------------------------------------------------------------------
 # Decision 7: notifications
 # ---------------------------------------------------------------------------
-async def test_d7_rejected_floor_command_notifies_once(hass: HomeAssistant) -> None:
+async def test_d7_rejected_floor_command_notifies_once(hass: HomeAssistant, freezer) -> None:
     """Decision 7: a floor command the head rejects is notified once per run
-    and retried every update; the trip notice came first."""
+    and retried every update; the trip notice came first. The rejection in
+    the trip's own update is held back by the rate limit (P5) and goes out
+    at the first rejection after the hour, once."""
     f = await _setup(hass)
     head = _head(hass, f.b)
     real = head.async_set_temperature
@@ -559,6 +582,9 @@ async def test_d7_rejected_floor_command_notifies_once(hass: HomeAssistant) -> N
     head.async_set_temperature = reject
     await f.temp(SENSOR_B, 45)
     assert _s(hass, f.b) == "off"
+    assert len(f.notes) == 1 and "freeze floor" in f.notes[0]
+    await _tick(hass, freezer, HOUR + timedelta(seconds=5))
+    await f.compute()
     assert len(f.notes) == 2 and "rejected" in f.notes[1] and "invented rejection" in f.notes[1]
     await f.compute()
     assert len(f.notes) == 2
@@ -598,12 +624,190 @@ async def test_a_rejected_floor_run_is_held_not_heat_while_the_head_refuses(
     assert (_s(hass, f.b), f.floor(1)) == ("heat", ("heat", None))
 
 
-async def test_d7_no_notify_service_sends_nothing_and_still_runs(hass: HomeAssistant) -> None:
-    """Decision 7: notices use the integration's notification service; with
-    none configured nothing is sent, and the floor still protects the room."""
+async def test_d7_no_notify_service_falls_back_to_a_home_assistant_notification(
+    hass: HomeAssistant,
+) -> None:
+    """Decision 7 / P2: notices use the integration's notification service;
+    with none configured the trip notice becomes a Home Assistant
+    notification (never log-only), and the floor still protects the room."""
     f = await _setup(hass, notify=False)
     await f.temp(SENSOR_B, 45)
     assert (_s(hass, f.b), f.notes) == ("heat", [])
+    trip_id = f"mxz_coordinator_{f.entry.entry_id}_floor_secondary_trip"
+    assert [pid for pid, _ in f.pinned] == [trip_id]
+    assert "below its freeze floor of 50 °F" in f.pinned[0][1]
+
+
+def _pn_panel(hass: HomeAssistant) -> dict[str, str]:
+    """A live mirror of Home Assistant's notification panel, id -> message,
+    kept from the component's own update callback (what the frontend's
+    subscription is fed)."""
+    from homeassistant.components import persistent_notification as pn
+
+    panel: dict[str, str] = {}
+
+    @callback
+    def _update(kind, notifications) -> None:
+        for nid, notification in notifications.items():
+            if kind == pn.UpdateType.REMOVED:
+                panel.pop(nid, None)
+            else:
+                panel[nid] = notification["message"]
+
+    pn.async_register_callback(hass, _update)
+    return panel
+
+
+async def test_p2_without_a_notify_service_every_floor_notice_kind_reaches_ha_notifications(
+    hass: HomeAssistant, freezer
+) -> None:
+    """P2, through Home Assistant's own notification component: with no
+    notify service, trip, blind, stalled and rejected notices each appear
+    as a notification with one id per room and kind, and a repeat of a kind
+    replaces the last (two trips leave one trip notification, showing the
+    later one). Notices are an hour apart (the P5 limit)."""
+    from homeassistant.setup import async_setup_component
+
+    assert await async_setup_component(hass, "persistent_notification", {})
+    shown = _pn_panel(hass)
+    f = await _setup(hass, notify=False, pin_real=True)
+    base = f"mxz_coordinator_{f.entry.entry_id}_floor_secondary"
+    await f.temp(SENSOR_B, 45)
+    await hass.async_block_till_done()
+    assert list(shown) == [f"{base}_trip"]
+    assert "is at 45 °F" in shown[f"{base}_trip"]
+    await _tick(hass, freezer, HOUR)
+    hass.states.async_set(SENSOR_B, "unavailable")
+    await hass.async_block_till_done()
+    await f.compute()
+    await _tick(hass, freezer, HOUR)
+    await f.temp(SENSOR_B, 44)  # a second trip: replaces the first
+    await hass.async_block_till_done()
+    assert sorted(shown) == [f"{base}_blind", f"{base}_trip"]
+    assert "Room sensor" in shown[f"{base}_blind"]
+    assert "is at 44 °F" in shown[f"{base}_trip"]
+    await _tick(hass, freezer, 2 * HOUR + timedelta(seconds=5))
+    await f.compute()  # the no-progress cap
+    head = _head(hass, f.b)
+
+    async def reject(**kwargs):
+        raise HomeAssistantError("invented rejection")
+
+    head.async_set_temperature = reject
+    await _tick(hass, freezer, HOUR)
+    await f.temp(SENSOR_B, 43)  # a new low re-arms; the head rejects it
+    await _tick(hass, freezer, HOUR)
+    await f.compute()
+    await hass.async_block_till_done()
+    assert sorted(shown) == [f"{base}_{kind}" for kind in ("blind", "rejected", "stalled", "trip")]
+    assert "Stalled" in shown[f"{base}_stalled"]
+    assert "invented rejection" in shown[f"{base}_rejected"]
+
+
+async def test_p2_with_a_notify_service_no_ha_notification_is_made(hass: HomeAssistant) -> None:
+    """P2 negative: with a notify service set, floor notices go only there,
+    exactly as before; nothing is added to Home Assistant's notifications."""
+    f = await _setup(hass)
+    await f.temp(SENSOR_B, 45)
+    assert len(f.notes) == 1 and f.pinned == []
+
+
+async def test_p2_a_notify_service_naming_no_service_falls_back(hass: HomeAssistant) -> None:
+    """P2: a stored notify value that names no service (no ``domain.``, as an
+    old hand-made entry can hold) sends nothing through notify, so the
+    floor notice falls back to a Home Assistant notification too."""
+    f = await _setup(hass, notify=False, **{CONF_NOTIFY_SERVICE: "floor_test"})
+    assert f.coord.notify_service == "floor_test"
+    await f.temp(SENSOR_B, 45)
+    assert f.notes == [] and len(f.pinned) == 1
+
+
+# ---------------------------------------------------------------------------
+# P5: at most one floor notice per room per hour
+# ---------------------------------------------------------------------------
+async def _flap(f: Floor, values) -> None:
+    for value in values:
+        if isinstance(value, str):
+            f.hass.states.async_set(SENSOR_B, value)
+            await f.hass.async_block_till_done()
+            await f.compute()
+        else:
+            await f.temp(SENSOR_B, value)
+
+
+@pytest.mark.parametrize("notify", [True, False], ids=["notify_service", "ha_notification"])
+async def test_p5_a_flapping_sensor_sends_one_notice_an_hour(
+    hass: HomeAssistant, freezer, caplog, notify: bool
+) -> None:
+    """P5: the guest sensor flaps unusable and back below the floor every 5
+    minutes for 55 minutes: trip, blind, trip, blind... One notice goes out
+    (the first trip); every held-back one is still logged at WARNING, saying
+    it was rate-limited. Once the hour is up the room, blind again by then,
+    sends its blind notice at the next update, and the flap after that is
+    held back again."""
+    f = await _setup(hass, notify=notify)
+    sent = (lambda: f.notes) if notify else (lambda: [m for _, m in f.pinned])
+    await f.temp(SENSOR_B, 45)
+    for value in ("unavailable", 45, "unknown", 44, "unavailable", 45, "unavailable", 44,
+                  "unknown", 45, "unavailable"):
+        await _tick(hass, freezer, timedelta(minutes=5))
+        await _flap(f, (value,))
+    assert len(sent()) == 1 and "is at 45 °F" in sent()[0]
+    limited = [r for r in caplog.records if "rate-limited" in r.getMessage()]
+    assert limited and all(r.levelname == "WARNING" for r in limited)
+    assert any("blind" in r.getMessage() for r in limited)
+    assert any("is at 44 °F" in r.getMessage() for r in limited)
+    await _tick(hass, freezer, timedelta(minutes=6))  # 61 min after the first
+    await f.compute()
+    assert len(sent()) == 2 and "blind" in sent()[1]
+    await _tick(hass, freezer, timedelta(minutes=5))
+    await _flap(f, (45, "unavailable"))
+    assert len(sent()) == 2
+
+
+async def test_p5_a_held_back_blind_notice_goes_out_after_the_hour(
+    hass: HomeAssistant, freezer, caplog
+) -> None:
+    """P5 with decision 7: the sensor dies 10 minutes after a trip notice.
+    The blind notice is held back (logged once, not on every update) and
+    sent at the first update after the hour while the room is still blind,
+    then never again for that episode."""
+    f = await _setup(hass)
+    await f.temp(SENSOR_B, 45)
+    await _tick(hass, freezer, timedelta(minutes=10))
+    await _flap(f, ("unavailable",))
+    for _ in range(3):
+        await _tick(hass, freezer, timedelta(minutes=10))
+        await f.compute()
+    assert len(f.notes) == 1
+    limited = [r for r in caplog.records if "rate-limited" in r.getMessage()]
+    assert len(limited) == 1 and "blind" in limited[0].getMessage()
+    await _tick(hass, freezer, timedelta(minutes=21))  # 61 min after the trip
+    await f.compute()
+    assert len(f.notes) == 2 and "blind" in f.notes[1]
+    await _tick(hass, freezer, 2 * HOUR)
+    await f.compute()
+    assert len(f.notes) == 2
+
+
+async def test_p5_two_rooms_are_limited_independently(hass: HomeAssistant, freezer) -> None:
+    """P5: the limit is per room. Both disabled rooms trip a minute apart:
+    two notices. The first room's blind notice 5 minutes later is held back;
+    the second room's own limit is not used up by the first's."""
+    f = await _setup(hass, floors=((50.0, 90.0), (50.0, 90.0)), enable=("_coordinator_enable",))
+    await f.temp(SENSOR_A, 45)
+    await _tick(hass, freezer, timedelta(minutes=1))
+    await f.temp(SENSOR_B, 46)
+    assert len(f.notes) == 2
+    assert f.notes[0].startswith("Primary") and f.notes[1].startswith("Guest room")
+    await _tick(hass, freezer, timedelta(minutes=5))
+    hass.states.async_set(SENSOR_A, "unavailable")
+    await hass.async_block_till_done()
+    await f.compute()
+    assert len(f.notes) == 2
+    await _tick(hass, freezer, timedelta(minutes=55))  # 61 min after the primary's
+    await f.compute()
+    assert len(f.notes) == 3 and f.notes[2].startswith("Primary") and "blind" in f.notes[2]
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +1007,9 @@ async def test_d11_a_room_that_keeps_going_the_wrong_way_after_a_stall_is_protec
     for value in slide:
         await f.temp(SENSOR_B, value)
         assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off"), value
+    await _tick(hass, freezer, HOUR)  # past the stall notice's rate limit (P5)
+    await f.compute()
+    assert (f.floor(1)[0], _s(hass, f.b)) == ("blind", "off")
     await f.temp(SENSOR_B, rearm)
     assert (f.floor(1), _s(hass, f.b)) == ((mode, None), mode)
     assert len([n for n in f.notes if notice in n]) == 2
