@@ -168,7 +168,9 @@ supported hardware and setup apply. It is not tested for parity with this integr
   freeze floor or overheat ceiling's two hours of driving before it stalls, and the
   limit of one floor notice per room per hour. A clock jump can no longer end any of
   them early or hold it late, and time the host spends suspended doesn't count toward
-  them. No setting changes, and each behaves as before across a restart. A floor's
+  them. So a clock that jumps forward at boot (a host without a battery clock) no
+  longer makes a running floor look stalled, and after a suspend a floor stall or a
+  held-back floor notice can come later by the clock on the wall. No setting changes, and each behaves as before across a restart. A floor's
   re-arm after a person takes the head back stays on the time of day, because it is
   saved across a restart and shown as a time. These follow-on changes were made for
   this release on the pattern of #32; they are not part of #32. See

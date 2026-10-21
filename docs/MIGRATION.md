@@ -32,6 +32,14 @@ Linux the time the host spends suspended doesn't count toward them: a coil-dryin
 under way at suspend keeps the fan running for the rest of its time after resume, and
 suspended time is neither charged as driving nor counted toward the notice hour.
 
+Two consequences, accepted for 3.7.1:
+
+- A host whose clock jumps forward at boot or mid-run, such as one without a battery
+  clock that sets its time from NTP, no longer makes a running freeze floor or overheat
+  ceiling look stalled, and no longer cuts a coil-drying wait short.
+- After a suspend, a floor run's stall and a held-back floor notice come later in
+  wall-clock time than before, by the time the host was suspended.
+
 **Nothing to change.** No setting changes and nothing new is stored. After a restart a
 head found cooling or in fan only gets a full coil-drying wait from then, as before. A
 floor run's saved record keeps its driven time in seconds, as before, and downtime is
