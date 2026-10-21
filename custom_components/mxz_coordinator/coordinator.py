@@ -3828,6 +3828,13 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._floor_end(zone.slug)  # their earlier run is not handed back
         self._floor_yield[zone.slug] = (run.direction, now)
         self._hands_off_released.add(zone.slug)
+        # A command of ours still waiting to be sent (an off during the wait)
+        # would land over theirs: disown it, as a superseded one is. One
+        # already sent cannot be called back.
+        active = self._deliveries.get(zone.climate_id)
+        if active is not None and active["owner"] is self:
+            active["superseded"] = True
+            self._publish_delivery()
         _LOGGER.info(
             "MXZ floor: %s's head was changed by hand during a floor run; "
             "MXZ leaves it to that person until the floor re-arms", zone.name,

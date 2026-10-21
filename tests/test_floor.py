@@ -9,6 +9,7 @@ device. The pure math is in ``test_floor_logic.py``.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -1069,6 +1070,36 @@ async def test_d8b_mxz_own_off_and_unavailable_do_not_yield(hass: HomeAssistant)
     f.coord._last_mode_change_ts = 0.0
     await f.compute()
     assert (_s(hass, f.b), f.floor(1)[0]) == ("heat", "heat")
+
+
+async def test_d8b_an_unsent_mxz_off_does_not_land_after_the_persons_change(
+    hass: HomeAssistant,
+) -> None:
+    """Decision 8(b), NIT-2: the floor waits out the mode change, so MXZ has
+    an off for the head queued, still unsent (another command holds the
+    head). The person switches the head to heat meanwhile: that is a yield,
+    and the queued off is disowned, so it never lands over their heat."""
+    f = await _setup(hass, hands_off=(False, True), hysteresis=None)
+    await f.temp(SENSOR_A, 76)  # the enabled room holds cool; the wait runs
+    await _remote(hass, f.b, "fan_only")  # the person's head, before any trip
+    await f.compute()
+    lock = f.coord._head_locks.setdefault(f.b, asyncio.Lock())
+    await lock.acquire()  # stands in for a command still running on that head
+    sent = _mode_commands(hass, f.b)
+    # (No block_till_done while the lock is held: it would wait for the
+    # queued delivery forever.)
+    hass.states.async_set(SENSOR_B, 45)
+    await f.coord.async_refresh()
+    assert f.coord._deliveries[f.b]["act"] == "off"
+    await hass.services.async_call(
+        "climate", "set_hvac_mode", {"entity_id": f.b, "hvac_mode": "heat"}, blocking=True
+    )
+    for _ in range(5):
+        await asyncio.sleep(0)
+    lock.release()
+    await hass.async_block_till_done()
+    await f.compute()
+    assert (_s(hass, f.b), sent, f.floor(1)[0]) == ("heat", ["heat"], "yielded")
 
 
 # ---------------------------------------------------------------------------
