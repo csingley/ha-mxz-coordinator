@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -201,8 +202,8 @@ def test_additional_workflow_permissions_and_ordinary_execution():
     assert set(wf["jobs"]) == {"approval", "exact-ha202610"}
     assert wf["jobs"]["approval"]["permissions"] == {"contents": "read", "actions": "read"}
     actions = [s for s in job["steps"] if "uses" in s]
-    assert actions == [{"uses": "actions/checkout@v4", "with": {"persist-credentials": "false"}}, UPLOAD_STEP]
-    assert job["steps"][-2]["if"] == "always()" and job["steps"][-1]["if"] == "always()"
+    assert actions == [{"uses": "actions/checkout@v4", "with": {"persist-credentials": "false"}}]
+    assert job["steps"][-1]["if"] == "always()"
     script = (ROOT / "tools/ci-ha202610.sh").read_text()
     assert "args=(300s tests/)" in script
     assert "-p tools.pytest_phases" in script
@@ -264,13 +265,18 @@ def test_fresh_boot_pass_follows_the_suite_and_precedes_the_export():
     assert names[fresh - 1] == "Full retained suite with original phases"
     assert steps[fresh - 1]["run"] == "bash tools/ci-ha202610.sh suite"
     assert steps[fresh] == FRESH_BOOT_STEP
-    assert fresh == len(steps) - 3 and steps[-2]["run"] == "bash tools/ci-ha202610.sh export"
+    assert fresh == len(steps) - 2 and steps[-1]["run"] == "bash tools/ci-ha202610.sh export"
+
+
+def script_branch(case):
+    script = (ROOT / "tools/ci-ha202610.sh").read_text()
+    head = "\n  " + case + ")\n"
+    assert script.count(head) == 1
+    return script.split(head, 1)[1].split("\n    ;;\n", 1)[0]
 
 
 def fakeboot_branch():
-    script = (ROOT / "tools/ci-ha202610.sh").read_text()
-    assert script.count("\n  fakeboot)\n") == 1
-    return script.split("\n  fakeboot)\n", 1)[1].split("\n    ;;\n", 1)[0]
+    return script_branch("fakeboot")
 
 
 def test_fresh_boot_pass_is_the_full_suite_on_the_two_minute_clock():
@@ -300,6 +306,9 @@ def test_fresh_boot_exit_is_saved_and_returned(tmp_path, status):
     assert (root / "fakeboot.log").read_text().splitlines() == [
         "ARGV -m pytest -p tools.fakeboot -p tools.pytest_phases tests/ -q -s -p no:cacheprovider",
         "FAKE_UPTIME=120"]
+    # A short failed log is shown whole in the step; a passing one is not shown.
+    assert result.stdout == ("" if status == 0 else (root / "fakeboot.log").read_text())
+    assert result.stderr == ""
 
 
 def test_fresh_boot_clock_line():
@@ -356,57 +365,6 @@ def test_export_requires_complete_fresh_boot_evidence(tmp_path, capsys, fault):
     assert errors == expected
 
 
-EVIDENCE_ROOT = "${{ runner.temp }}/ha202610-${{ github.run_id }}-a1/"
-UPLOADED = ("suite.log", "suite.exit", "fakeboot.log", "fakeboot.exit", "sentinel.log", "sentinel.exit",
-            "checks.log", "setup.log", "runner.txt", "source.txt", "logs/*/receipt.json")
-UPLOAD_STEP = {
-    "name": "Upload suite evidence", "if": "always()", "uses": "actions/upload-artifact@v4",
-    "with": {"name": "ha202610-evidence-${{ github.run_id }}-${{ github.run_attempt }}",
-             "retention-days": "14", "path": "".join(EVIDENCE_ROOT + name + "\n" for name in UPLOADED)},
-}
-
-
-def upload_violations(wf):
-    """The suite evidence leaves the runner on every outcome, after everything that writes it."""
-    errors = []
-    if wf.get("permissions") != {"contents": "read"}:
-        errors.append("token permissions")
-    job = wf["jobs"]["exact-ha202610"]
-    if "permissions" in job:
-        errors.append("job credential override")
-    steps = job["steps"]
-    uploads = [i for i, s in enumerate(steps) if "upload-artifact" in s.get("uses", "")]
-    if len(uploads) != 1:
-        return errors + ["missing or repeated upload"]
-    step = steps[uploads[0]]
-    if step != UPLOAD_STEP:
-        errors.append("upload step differs")
-    if step.get("if") != "always()":
-        errors.append("upload skipped on failure")
-    runs = [s.get("run") for s in steps]
-    writers = ["bash tools/ci-ha202610.sh " + mode for mode in ("suite", "fakeboot", "export")]
-    if not all(run in runs and runs.index(run) < uploads[0] for run in writers):
-        errors.append("upload before evidence")
-    return errors
-
-
-def test_evidence_upload_runs_last_on_every_outcome():
-    assert upload_violations(workflow()) == []
-    assert workflow()["jobs"]["exact-ha202610"]["steps"][-1] == UPLOAD_STEP
-
-
-def test_uploaded_files_are_where_the_script_writes_them(tmp_path, capsys):
-    script = (ROOT / "tools/ci-ha202610.sh").read_text()
-    assert 'root="$RUNNER_TEMP/ha202610-$GITHUB_RUN_ID-a1"' in script
-    for mode in ("sentinel", "suite"):
-        assert '> "$root/$mode.log" 2>&1' in script and '> "$root/$mode.exit"' in script
-    assert '> "$root/fakeboot.log" 2>&1' in script and '> "$root/fakeboot.exit"' in script
-    # Every named file is one the export itself requires, so none is decoration.
-    required = {e[len("missing "):] for e in export_errors(tmp_path, capsys) if e.startswith("missing ")}
-    assert set(UPLOADED[:-1]) <= required
-    assert {"suite.log", "suite.exit", "fakeboot.log", "fakeboot.exit"} <= set(UPLOADED)
-
-
 def test_both_full_suite_passes_have_the_same_300_second_limit():
     script = (ROOT / "tools/ci-ha202610.sh").read_text()
     assert re.findall(r"args=\((\d+)s ", script) == ["60", "300"]
@@ -414,43 +372,87 @@ def test_both_full_suite_passes_have_the_same_300_second_limit():
     assert "args=(300s tests/)" in script and "180s" not in script
 
 
-@pytest.mark.parametrize("change,error", [
-    ("absent", "missing or repeated upload"),
-    ("twice", "missing or repeated upload"),
-    ("on-success", "upload skipped on failure"),
-    ("before-fakeboot", "upload before evidence"),
-    ("before-export", "upload before evidence"),
-    ("no-suite-log", "upload step differs"),
-    ("no-fakeboot-exit", "upload step differs"),
-    ("floating-pin", "upload step differs"),
-    ("long-retention", "upload step differs"),
-    ("job-permissions", "job credential override"),
-    ("write-token", "token permissions"),
-])
-def test_evidence_upload_cannot_be_dropped_or_weakened(change, error):
+INVENTED_LINES = "".join(f"INVENTED LINE {i}\n" for i in range(1, 251))
+
+
+def run_branch(tmp_path, case, ending, mode=None, limit=None, path=os.defpath):
+    """Run one of the script's own branches against an invented interpreter that
+    writes its arguments and 250 numbered lines, then ends with ``ending``."""
+    stub = tmp_path / "invented-python"
+    stub.write_text('#!/bin/bash\nprintf "ARGV %s\\n" "$*"\n'
+                    'for ((i = 1; i <= 250; i++)); do printf "INVENTED LINE %s\\n" "$i"; done\n' + ending + "\n")
+    stub.chmod(0o755)
+    root = tmp_path / "invented-root"
+    root.mkdir()
+    branch = script_branch(case)
+    if limit:
+        # A unit fixture: a short limit stands in for 300 s so a real timeout fires.
+        assert branch.count("300s") == 1
+        branch = branch.replace("300s", limit)
+    prefix = f"python={stub}; root={root}\n" + (f"mode={mode}\n" if mode else "")
+    result = subprocess.run(["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", prefix + branch],
+                            env={"PATH": path}, text=True, capture_output=True, check=False, timeout=30)
+    return result, root
+
+
+FULL_PASSES = [("sentinel|suite", "suite", "suite"), ("fakeboot", None, "fakeboot")]
+
+
+@pytest.mark.parametrize("case,mode,name", FULL_PASSES, ids=["suite", "fakeboot"])
+@pytest.mark.parametrize("ending,status", [("exit 1", 1), ("exit 2", 2), ("exec sleep 30", 124), ("exit 137", 137)],
+                         ids=["failed", "interrupted", "timeout", "killed"])
+def test_failed_or_timed_out_pass_prints_the_tail_of_its_own_log(tmp_path, case, mode, name, ending, status):
+    result, root = run_branch(tmp_path, case, ending, mode, limit="1s" if status == 124 else None)
+    assert result.returncode == status
+    assert (root / (name + ".exit")).read_text() == f"{status}\n"
+    log = (root / (name + ".log")).read_text()
+    assert log.startswith("ARGV -m pytest ") and log.endswith(INVENTED_LINES)
+    # Exactly the last 200 of the 251 lines, and nothing else on either stream.
+    assert result.stdout == "".join(f"INVENTED LINE {i}\n" for i in range(51, 251))
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("case,mode,name", FULL_PASSES, ids=["suite", "fakeboot"])
+def test_a_passing_pass_prints_nothing(tmp_path, case, mode, name):
+    result, root = run_branch(tmp_path, case, "exit 0", mode)
+    assert result.returncode == 0 and (root / (name + ".exit")).read_text() == "0\n"
+    assert (root / (name + ".log")).read_text().endswith(INVENTED_LINES)
+    assert result.stdout == "" and result.stderr == ""
+
+
+def test_a_failed_sentinel_prints_nothing(tmp_path):
+    result, root = run_branch(tmp_path, "sentinel|suite", "exit 1", "sentinel")
+    assert result.returncode == 1 and (root / "sentinel.exit").read_text() == "1\n"
+    assert (root / "sentinel.log").read_text().endswith(INVENTED_LINES)
+    assert result.stdout == "" and result.stderr == ""
+
+
+@pytest.mark.parametrize("case,mode,name", FULL_PASSES, ids=["suite", "fakeboot"])
+def test_a_failing_tail_cannot_change_the_exit(tmp_path, case, mode, name):
+    tools = tmp_path / "invented-bin"
+    tools.mkdir()
+    # Only the shell and timeout are on PATH, so the tail itself fails.
+    for tool in ("bash", "timeout"):
+        (tools / tool).symlink_to(shutil.which(tool, path=os.defpath))
+    result, root = run_branch(tmp_path, case, "exit 1", mode, path=str(tools))
+    assert result.returncode == 1 and (root / (name + ".exit")).read_text() == "1\n"
+    assert "tail" in result.stderr and result.stdout == ""
+
+
+def uploads(wf):
+    """As in ci.yml's contract, no job of this workflow uploads an artifact."""
+    return [s for job in wf["jobs"].values() for s in job.get("steps", []) if "upload-artifact" in s.get("uses", "")]
+
+
+def test_no_artifact_upload_as_in_the_original_ci():
+    assert uploads(workflow()) == []
+    assert "upload-artifact" not in (ROOT / ".github/workflows/ci-ha2026.10.yml").read_text()
+
+
+@pytest.mark.parametrize("job,uses", [("exact-ha202610", "actions/upload-artifact@v4"),
+                                      ("exact-ha202610", "actions/upload-artifact@v7"),
+                                      ("approval", "actions/upload-artifact@v4")])
+def test_an_added_upload_is_refused(job, uses):
     wf = copy.deepcopy(workflow())
-    steps = wf["jobs"]["exact-ha202610"]["steps"]
-    upload = steps[-1]
-    if change == "absent":
-        steps.pop()
-    elif change == "twice":
-        steps.append(copy.deepcopy(upload))
-    elif change == "on-success":
-        upload["if"] = "success()"
-    elif change in ("before-fakeboot", "before-export"):
-        steps.pop()
-        name = FRESH_BOOT_STEP["name"] if change == "before-fakeboot" else steps[-1]["name"]
-        steps.insert([s.get("name") for s in steps].index(name), upload)
-    elif change == "no-suite-log":
-        upload["with"]["path"] = upload["with"]["path"].replace(EVIDENCE_ROOT + "suite.log\n", "")
-    elif change == "no-fakeboot-exit":
-        upload["with"]["path"] = upload["with"]["path"].replace(EVIDENCE_ROOT + "fakeboot.exit\n", "")
-    elif change == "floating-pin":
-        upload["uses"] = "actions/upload-artifact@main"
-    elif change == "long-retention":
-        upload["with"]["retention-days"] = "90"
-    elif change == "job-permissions":
-        wf["jobs"]["exact-ha202610"]["permissions"] = {"contents": "read", "actions": "write"}
-    else:
-        wf["permissions"] = {"contents": "write"}
-    assert error in upload_violations(wf)
+    wf["jobs"][job]["steps"].append({"name": "Invented upload", "if": "always()", "uses": uses})
+    assert len(uploads(wf)) == 1
