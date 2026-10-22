@@ -599,7 +599,8 @@ def test_the_help_text_says_what_blank_means_in_both_flows() -> None:
     help_text = (
         "Leave blank to use Allowed drift. The room always runs back to its"
         " target. These only set how far it can wander before a head starts"
-        " again. A room's own drift number replaces both."
+        " again. A room's own drift number, once set, replaces both. A room's"
+        " own uneven drift (Rooms, then the room) replaces either one."
     )
     for flow in ("config", "options"):
         advanced = strings[flow]["step"]["comfort"]["sections"]["advanced"]

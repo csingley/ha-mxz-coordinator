@@ -128,6 +128,8 @@ from .const import (
     VANE_KICK_RETIRE_TIMEOUT,
     VANE_KICK_SPINUP,
     ZONE_CLIMATE,
+    ZONE_DRIFT_COOLER_BY,
+    ZONE_DRIFT_WARMER_BY,
     ZONE_EVIDENCE_BASIS,
     ZONE_FLOOR_HIGH,
     ZONE_FLOOR_LOW,
@@ -306,15 +308,25 @@ class Zone:
     # stored value that is not a finite number is none too.
     floor_low: float | None = None
     floor_high: float | None = None
+    # This room's own uneven drift (ZONE_DRIFT_COOLER_BY/WARMER_BY), from
+    # config, clamped into the unit profile's engage_bounds on load. None =
+    # not set (or not a finite number): that side falls through.
+    drift_cooler_by: float | None = None
+    drift_warmer_by: float | None = None
 
 
-def _parse_zones(conf: dict[str, Any], target_default: float) -> list[Zone]:
+def _parse_zones(
+    conf: dict[str, Any],
+    target_default: float,
+    engage_bounds: tuple[float, float],
+) -> list[Zone]:
     """Build the ordered Zone list from entry config.
 
     Prefers the v2 ``zones`` list; falls back to the legacy flat
     primary_*/secondary_* keys (pre-migration entries and old tests). Legacy
     flat vane keys still override zones 0/1 when present (v2.9 options-flow
-    overrides live there on migrated entries).
+    overrides live there on migrated entries). ``engage_bounds`` clamps a
+    room's own uneven drift, exactly as it clamps the global sides.
     """
     raw = conf.get(CONF_ZONES)
     if not raw:
@@ -357,6 +369,8 @@ def _parse_zones(conf: dict[str, Any], target_default: float) -> list[Zone]:
             sample_sequence_attribute=z.get(ZONE_SAMPLE_SEQUENCE_ATTR),
             floor_low=_finite(z.get(ZONE_FLOOR_LOW)),
             floor_high=_finite(z.get(ZONE_FLOOR_HIGH)),
+            drift_cooler_by=_drift_side(z.get(ZONE_DRIFT_COOLER_BY), *engage_bounds),
+            drift_warmer_by=_drift_side(z.get(ZONE_DRIFT_WARMER_BY), *engage_bounds),
         )
         for i, z in enumerate(raw)
     ]
@@ -418,7 +432,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Ordered zone list (index 0 = highest standoff priority). Each zone
         # carries its head/sensor/vane ids plus the entity-owned target/enable.
-        self.zones: list[Zone] = _parse_zones(conf, self.target_default)
+        self.zones: list[Zone] = _parse_zones(
+            conf, self.target_default, self._profile["engage_bounds"]
+        )
         self.notify_service: str | None = conf.get(CONF_NOTIFY_SERVICE) or None
 
         # Unit-dependent tunables fall back to the system-unit profile default;
@@ -4166,10 +4182,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def zone_drift_sides(self, zone: Zone) -> tuple[float, float]:
         """The drift in use per side: (below target before heat, above before cool).
 
-        The one place that decides it; every start decision reads it. A room's
-        own drift number replaces both sides, so presence automations keep
-        working unchanged. Otherwise each side is its global "cooler by" /
-        "warmer by", and a blank one is Allowed drift: with both blank this is
+        The one place that decides it; every start decision reads it. Per
+        side, the first of these that is set wins: the room's own "cooler by"
+        / "warmer by", the room's drift number (an explicit write, never the
+        global it displays while following), the global "cooler by" /
+        "warmer by", then Allowed drift. With nothing set this is
         (zone_drift, zone_drift), exactly the single drift of before.
         """
         (heat, _), (cool, _) = self.zone_drift_sides_from(zone)
@@ -4182,17 +4199,25 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         The precedence lives here only, so the plan's ``drift_heat_from`` /
         ``drift_cool_from`` name the same branch that chose the value:
-        ``room`` (the room's own drift number), ``cooler_by`` / ``warmer_by``
-        (the global side), or ``allowed_drift`` (that side left blank).
+        ``room_cooler_by`` / ``room_warmer_by`` (the room's own side),
+        ``room`` (the room's drift number), ``cooler_by`` / ``warmer_by``
+        (the global side), or ``allowed_drift`` (nothing else set).
         """
-        if zone.drift is not None:
-            drift = self.zone_drift(zone)
-            return (drift, "room"), (drift, "room")
+
+        def side(
+            own: float | None, own_from: str, glob: float | None, glob_from: str
+        ) -> tuple[float, str]:
+            if own is not None:
+                return own, own_from
+            if zone.drift is not None:
+                return self.zone_drift(zone), "room"
+            if glob is not None:
+                return glob, glob_from
+            return self.engage_deadband, "allowed_drift"
+
         return (
-            (self.engage_deadband, "allowed_drift") if self.drift_cooler_by is None
-            else (self.drift_cooler_by, "cooler_by"),
-            (self.engage_deadband, "allowed_drift") if self.drift_warmer_by is None
-            else (self.drift_warmer_by, "warmer_by"),
+            side(zone.drift_cooler_by, "room_cooler_by", self.drift_cooler_by, "cooler_by"),
+            side(zone.drift_warmer_by, "room_warmer_by", self.drift_warmer_by, "warmer_by"),
         )
 
     def reset_engage_latch(self, slug: str) -> None:
@@ -4415,6 +4440,10 @@ def _floor_window(value: Any) -> tuple[tuple[float, float], ...]:
     return tuple(pairs)
 
 
+# The drift_*_from values that come from the room itself (its own side, or its
+# drift number): either one makes drift_source "room".
+ROOM_DRIFT_SOURCES = frozenset({"room", "room_cooler_by", "room_warmer_by"})
+
 # The per-room start-point keys, in the plan's room rows and on the room
 # thermostat (read from the plan, never recomputed there).
 START_POINT_KEYS = (
@@ -4449,7 +4478,7 @@ def _start_points(
     """
     eco = common["eco"]
     points: dict[str, Any] = {
-        "drift_source": "room" if sources[0] == "room" else "global",
+        "drift_source": "room" if ROOM_DRIFT_SOURCES & set(sources) else "global",
         "drift_heat_from": sources[0],
         "drift_cool_from": sources[1],
         "heat_start": None,

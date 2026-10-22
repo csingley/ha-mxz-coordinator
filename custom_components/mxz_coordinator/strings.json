@@ -113,8 +113,8 @@
             },
             "data_description": {
               "mode_hysteresis": "Protects the compressor. 600 seconds (10 minutes) is recommended.",
-              "drift_cooler_by": "How far below target a room can get before heating starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number replaces both.",
-              "drift_warmer_by": "How far above target a room can get before cooling starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number replaces both."
+              "drift_cooler_by": "How far below target a room can get before heating starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number, once set, replaces both. A room's own uneven drift (Rooms, then the room) replaces either one.",
+              "drift_warmer_by": "How far above target a room can get before cooling starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number, once set, replaces both. A room's own uneven drift (Rooms, then the room) replaces either one."
             }
           }
         }
@@ -355,8 +355,8 @@
             },
             "data_description": {
               "mode_hysteresis": "Protects the compressor. 600 seconds (10 minutes) is recommended.",
-              "drift_cooler_by": "How far below target a room can get before heating starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number replaces both.",
-              "drift_warmer_by": "How far above target a room can get before cooling starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number replaces both."
+              "drift_cooler_by": "How far below target a room can get before heating starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number, once set, replaces both. A room's own uneven drift (Rooms, then the room) replaces either one.",
+              "drift_warmer_by": "How far above target a room can get before cooling starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number, once set, replaces both. A room's own uneven drift (Rooms, then the room) replaces either one."
             }
           }
         }
@@ -479,6 +479,18 @@
           "hands_off": "Off (the default): a disabled room's head is held off, as always. On: when you disable the room, MXZ turns the head off once, retrying until the head reports off. Then MXZ leaves the head alone until you enable the room again."
         },
         "sections": {
+          "drift": {
+            "name": "Uneven drift",
+            "description": "Optional, for power users: leave both empty to change nothing. The room always runs back to its target. These only set how far it can wander before its head starts again. For each side, MXZ uses the first of these that's set: this page, this room's drift number (once you or an automation set it; Follow global drift clears it), Comfort's \"Let it get cooler by\" or \"Let it get warmer by\", and then Allowed drift. The drift number still shows one value; its drift_heat and drift_cool attributes show the drift in use on each side.",
+            "data": {
+              "room_cooler_by": "Let it get cooler by",
+              "room_warmer_by": "Let it get warmer by"
+            },
+            "data_description": {
+              "room_cooler_by": "How far below target this room can get before heating starts. Overrides this room's drift number and Comfort, on the heat side only. 0.5-5 °F (0.25-2.5 °C).",
+              "room_warmer_by": "How far above target this room can get before cooling starts. Overrides this room's drift number and Comfort, on the cool side only. 0.5-5 °F (0.25-2.5 °C)."
+            }
+          },
           "freshness": {
             "name": "Sensor freshness",
             "description": "Optional. Leave empty unless you know how often this sensor reports. Maximum age defaults to three missed reports; an explicit maximum age overrides that.",
