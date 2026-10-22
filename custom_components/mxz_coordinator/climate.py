@@ -121,10 +121,15 @@ class MXZRoomClimate(MXZEntity, CoordinatorEntity[MXZCoordinator], ClimateEntity
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Room explanations and software command observations."""
+        """Room explanations, software command observations, and start points.
+
+        The start points are plain read-only attributes from the plan. They
+        are never target_temp_low/high: the tile stays a single target.
+        """
         return {
             **self.coordinator.command_attributes(self._head_id),
             "control_reasons": self.coordinator._control_reasons(self._zone),
+            **self.coordinator.start_points(self._zone),
         }
 
     @property
