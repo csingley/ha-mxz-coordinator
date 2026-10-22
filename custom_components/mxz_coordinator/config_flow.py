@@ -30,6 +30,8 @@ from .const import (
     CONF_COIL_DRY_MINUTES,
     CONF_COOL_LOCKOUT_CEILING,
     CONF_DEMAND_THRESHOLD,
+    CONF_DRIFT_COOLER_BY,
+    CONF_DRIFT_WARMER_BY,
     CONF_ECO_COOL_MAX,
     CONF_ECO_HEAT_MIN,
     CONF_ENGAGE_DEADBAND,
@@ -578,6 +580,9 @@ _FRESHNESS_SECTION = "freshness"
 # in a collapsed section. Blank by default; a blank field stores no key.
 _FLOOR_FIELDS = (("floor_low", ZONE_FLOOR_LOW), ("floor_high", ZONE_FLOOR_HIGH))
 _FLOOR_SECTION = "floor"
+# Comfort's optional uneven drift. Blank by default; a blank field stores no
+# key (Allowed drift applies), and clearing one removes the saved key.
+_BLANK_CLEARS = (CONF_DRIFT_COOLER_BY, CONF_DRIFT_WARMER_BY)
 
 # Configure and setup pages: (top-level fields, {section: fields}), in display
 # order. Every tunable sits on exactly one page, and each validated pair sits
@@ -585,7 +590,7 @@ _FLOOR_SECTION = "floor"
 _PAGES: dict[str, tuple[tuple[str, ...], dict[str, tuple[str, ...]]]] = {
     "comfort": (
         (CONF_ENGAGE_DEADBAND, CONF_DEMAND_THRESHOLD, CONF_RESTING_MODE_BIAS),
-        {"advanced": (CONF_MODE_HYSTERESIS,)},
+        {"advanced": (CONF_MODE_HYSTERESIS, CONF_DRIFT_COOLER_BY, CONF_DRIFT_WARMER_BY)},
     ),
     "fan_idle": (
         (
@@ -988,6 +993,8 @@ def _num(unit: str | None = None) -> selector.NumberSelector:
 _NONNEGATIVE_TUNABLES = (
     CONF_DEMAND_THRESHOLD,
     CONF_ENGAGE_DEADBAND,
+    CONF_DRIFT_COOLER_BY,
+    CONF_DRIFT_WARMER_BY,
     CONF_MODE_HYSTERESIS,
     CONF_COIL_DRY_MINUTES,
 )
@@ -1092,6 +1099,15 @@ def _tunables_schema(
     """
     idle_action = eff.get(CONF_IDLE_ACTION, DEFAULT_IDLE_ACTION)
     idle_field: dict[vol.Marker, selector.SelectSelector] = {}
+    drift = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            mode=selector.NumberSelectorMode.BOX,
+            min=engage_min,
+            max=engage_max,
+            step=engage_min / 2,
+            **({"unit_of_measurement": temperature_unit} if temperature_unit else {}),
+        )
+    )
     if idle_options:
         idle_marker: vol.Marker = (
             vol.Optional(CONF_IDLE_ACTION, default=idle_action)
@@ -1114,15 +1130,13 @@ def _tunables_schema(
             vol.Optional(
                 CONF_ENGAGE_DEADBAND,
                 default=eff.get(CONF_ENGAGE_DEADBAND, DEFAULT_ENGAGE_DEADBAND),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    mode=selector.NumberSelectorMode.BOX,
-                    min=engage_min,
-                    max=engage_max,
-                    step=engage_min / 2,
-                    **({"unit_of_measurement": temperature_unit} if temperature_unit else {}),
-                )
-            ),
+            ): drift,
+            # Same box and bounds as Allowed drift, but no default: blank
+            # means Allowed drift, so only a stored value is suggested.
+            **{
+                vol.Optional(key, description={"suggested_value": eff.get(key)}): drift
+                for key in _BLANK_CLEARS
+            },
             vol.Optional(
                 CONF_MODE_HYSTERESIS,
                 default=eff.get(CONF_MODE_HYSTERESIS, DEFAULT_MODE_HYSTERESIS),
@@ -1239,6 +1253,8 @@ def _tunables_schema(
 # together); pairs get one sentence, because either value can be the wrong one.
 _FIELD_LABELS = {
     CONF_ENGAGE_DEADBAND: "Allowed drift",
+    CONF_DRIFT_COOLER_BY: "Let it get cooler by",
+    CONF_DRIFT_WARMER_BY: "Let it get warmer by",
     CONF_DEMAND_THRESHOLD: "Mode switch threshold",
     CONF_MODE_HYSTERESIS: "Minimum time between mode switches",
     CONF_COIL_DRY_MINUTES: "Coil drying time",
@@ -2256,7 +2272,20 @@ class MXZOptionsFlow(OptionsFlow):
                 clearable = _CLEARABLE_ENTITY.get(page)
                 if clearable and values and not values.get(clearable):
                     tunables[clearable] = None
-                return self._save(tunables, zones)
+                # The uneven drift fields go further: blank stores NO key, so
+                # clearing one drops the saved key from options and data alike.
+                # Same guards: only on the page that shows them, never on a
+                # degenerate empty submit.
+                cleared = frozenset(
+                    key
+                    for key in _BLANK_CLEARS
+                    if values
+                    and key in _page_fields(page)
+                    and values.get(key) in (None, "")
+                )
+                for key in cleared:
+                    tunables.pop(key, None)
+                return self._save(tunables, zones, cleared)
         schema, page_errors = _page_form(
             self.hass, page, {**conf, **values}, idle_options, errors
         )
@@ -2410,7 +2439,10 @@ class MXZOptionsFlow(OptionsFlow):
         return self._save({}, zones)
 
     def _save(
-        self, tunables: dict[str, Any], zones: list[dict[str, Any]]
+        self,
+        tunables: dict[str, Any],
+        zones: list[dict[str, Any]],
+        cleared: frozenset[str] = frozenset(),
     ) -> ConfigFlowResult:
         """Store one page: merge onto options, mirror into data, one update.
 
@@ -2420,13 +2452,14 @@ class MXZOptionsFlow(OptionsFlow):
         {**data, **options}, so if anything clears options out-of-band the
         config self-recovers from the data mirror instead of silently reverting
         to defaults. Flow-only keys are scrubbed from both stores (the zones
-        list is authoritative).
+        list is authoritative), and so are the ``cleared`` keys the page's
+        user emptied.
         """
         entry = self.config_entry
         merged = {
             k: v
             for k, v in {**entry.options, **tunables}.items()
-            if k not in _FLOW_ONLY_KEYS
+            if k not in _FLOW_ONLY_KEYS and k not in cleared
         }
         # If options already owns the effective zones list, update that
         # mirror too so its old copy cannot shadow this save.
@@ -2437,7 +2470,7 @@ class MXZOptionsFlow(OptionsFlow):
         data = {
             k: v
             for k, v in {**entry.data, **merged}.items()
-            if k not in _FLOW_ONLY_KEYS
+            if k not in _FLOW_ONLY_KEYS and k not in cleared
         }
         if zones:
             data[CONF_ZONES] = zones

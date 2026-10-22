@@ -107,10 +107,14 @@
           "advanced": {
             "name": "Advanced",
             "data": {
-              "mode_hysteresis": "Minimum time between mode switches"
+              "mode_hysteresis": "Minimum time between mode switches",
+              "drift_cooler_by": "Let it get cooler by",
+              "drift_warmer_by": "Let it get warmer by"
             },
             "data_description": {
-              "mode_hysteresis": "Protects the compressor. 600 seconds (10 minutes) is recommended."
+              "mode_hysteresis": "Protects the compressor. 600 seconds (10 minutes) is recommended.",
+              "drift_cooler_by": "How far below target a room can get before heating starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number replaces both.",
+              "drift_warmer_by": "How far above target a room can get before cooling starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number replaces both."
             }
           }
         }
@@ -345,10 +349,14 @@
           "advanced": {
             "name": "Advanced",
             "data": {
-              "mode_hysteresis": "Minimum time between mode switches"
+              "mode_hysteresis": "Minimum time between mode switches",
+              "drift_cooler_by": "Let it get cooler by",
+              "drift_warmer_by": "Let it get warmer by"
             },
             "data_description": {
-              "mode_hysteresis": "Protects the compressor. 600 seconds (10 minutes) is recommended."
+              "mode_hysteresis": "Protects the compressor. 600 seconds (10 minutes) is recommended.",
+              "drift_cooler_by": "How far below target a room can get before heating starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number replaces both.",
+              "drift_warmer_by": "How far above target a room can get before cooling starts. Leave blank to use Allowed drift. The room always runs back to its target. These only set how far it can wander before a head starts again. A room's own drift number replaces both."
             }
           }
         }

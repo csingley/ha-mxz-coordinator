@@ -1,5 +1,21 @@
 # Upgrading and migrating MXZ Coordinator
 
+## Uneven drift (unreleased)
+
+Two optional settings in Configure → Comfort → Advanced: **Let it get cooler by** and
+**Let it get warmer by**, stored as `drift_cooler_by` and `drift_warmer_by` only when
+set; emptying one removes its key.
+
+**Nothing to do.** No config-entry version change and no migration. An entry without
+the keys, which is every entry saved before this setting existed, uses Allowed drift on
+both sides, exactly as before. Each room's drift number and **Follow global drift** keep
+their meaning; a room's own drift still applies the same distance either way.
+
+The plan sensor's `zones` list gains `drift_heat` and `drift_cool` per room: the drift
+in use below and above target. Without the new settings both equal `drift`.
+
+See [Uneven drift](../README.md#uneven-drift).
+
 ## Mode-change wait on a monotonic clock (3.7.1)
 
 The mode-change wait (**Minimum time between mode switches**) is timed on Python's

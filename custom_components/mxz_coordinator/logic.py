@@ -40,7 +40,7 @@ def room_call(
     enabled: bool,
     eco: bool,
     sensor_ok: bool,
-    band: float,
+    band: float | None = None,
     eco_cool_max: float,
     eco_heat_min: float,
     neutral: str,
@@ -48,10 +48,16 @@ def room_call(
     heat_lockout_floor: float = 0.0,
     cool_lockout: bool = False,
     cool_lockout_ceiling: float = 200.0,
+    heat_band: float | None = None,
+    cool_band: float | None = None,
 ) -> str:
     """Per-room call for one band (demand uses S/'neutral', engage uses D/'satisfied').
 
     Mirrors the primary/secondary_demand and primary/secondary_engage attributes.
+
+    ``band`` is how far the room may sit off target either way. ``heat_band``
+    (below target) and ``cool_band`` (above target) replace it for one side
+    each; a side left None uses ``band``. Every side needs a value.
 
     ``heat_lockout`` holds off the heat call (the room idles instead of heating — e.g.
     to let passive solar warm it in summer) UNLESS the room has dropped below
@@ -60,6 +66,10 @@ def room_call(
     (let the room drift down on its own) UNLESS it rises above ``cool_lockout_ceiling``.
     The eco extremes are unaffected; the two lockouts are independent.
     """
+    heat_band = band if heat_band is None else heat_band
+    cool_band = band if cool_band is None else cool_band
+    if heat_band is None or cool_band is None:
+        raise TypeError("room_call needs band, or both heat_band and cool_band")
     if not enabled:
         return MODE_OFF
     if not sensor_ok:
@@ -70,11 +80,11 @@ def room_call(
         if temp < eco_heat_min:
             return MODE_HEAT
         return neutral
-    if temp > target + band:
+    if temp > target + cool_band:
         if cool_lockout and temp <= cool_lockout_ceiling:
             return neutral
         return MODE_COOL
-    if temp < target - band:
+    if temp < target - heat_band:
         if heat_lockout and temp >= heat_lockout_floor:
             return neutral
         return MODE_HEAT
@@ -84,8 +94,10 @@ def room_call(
 def engage_with_latch(
     *,
     prior: str | None,
-    band: float,
+    band: float | None = None,
     neutral: str,
+    heat_band: float | None = None,
+    cool_band: float | None = None,
     **call_kwargs,
 ) -> str:
     """Per-room engage with run-to-target hysteresis.
@@ -107,15 +119,23 @@ def engage_with_latch(
 
     Eco mode bypasses the latch entirely (protection extremes are already a
     wide band; run-to-extreme would defeat their purpose).
+
+    ``heat_band`` / ``cool_band`` split ``band`` by side exactly as in
+    :func:`room_call`. They only move where a run STARTS: every run still ends
+    at the target, whichever side's drift started it.
     """
     if prior in (MODE_COOL, MODE_HEAT) and not call_kwargs.get("eco"):
-        # Engaged phase: band 0 — the room runs exactly TO its target, then
-        # coasts. The re-engage drift (``band``) is the only tunable here.
+        # Engaged phase: band 0 on both sides — the room runs exactly TO its
+        # target, then coasts. The re-engage drift (``band``, or its per-side
+        # split) is the only tunable here.
         raw = room_call(band=0.0, neutral=neutral, **call_kwargs)
         if raw == prior or raw == MODE_OFF:
             return raw
         return neutral  # target reached / lockout / direction flip -> coast
-    return room_call(band=band, neutral=neutral, **call_kwargs)
+    return room_call(
+        band=band, heat_band=heat_band, cool_band=cool_band, neutral=neutral,
+        **call_kwargs,
+    )
 
 
 def freshness_window(

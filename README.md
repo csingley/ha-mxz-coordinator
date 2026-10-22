@@ -500,7 +500,7 @@ on a menu of six pages. Some settings sit in a collapsed section on their page.
 
 | Page | Settings | What they're for |
 | --- | --- | --- |
-| **Comfort** | Allowed drift, Mode switch threshold, Resting mode. Collapsed **Advanced**: Minimum time between mode switches | **Mode switch threshold / Allowed drift**: shared-mode voting, and how far a satisfied room drifts before calling again. Per-room drift numbers can override the global drift. **Resting mode**: Last used, Cool or Heat when no room is calling. **Minimum time between mode switches**: minimum dwell between shared heat/cool changes; default 600 seconds. |
+| **Comfort** | Allowed drift, Mode switch threshold, Resting mode. Collapsed **Advanced**: Minimum time between mode switches, Let it get cooler by, Let it get warmer by | **Mode switch threshold / Allowed drift**: shared-mode voting, and how far a satisfied room drifts before calling again. Per-room drift numbers can override the global drift. **Resting mode**: Last used, Cool or Heat when no room is calling. **Minimum time between mode switches**: minimum dwell between shared heat/cool changes; default 600 seconds. **Let it get cooler by / warmer by**: optional; see [Uneven drift](#uneven-drift). |
 | **Fan and idle** | Fan boost, Fan boost top speed, When a room reaches target, Coil drying time | **Fan boost / Fan boost top speed**: the automatic fan ladder and its ceiling. A manual hold takes precedence. **When a room reaches target / Coil drying time**: Fan only, Off, or Off after drying (fan only after cooling for a dwell, then off). Choices depend on common head support. |
 | **Seasons** | Weather source, Lock out heat when the high is at least, Lock out cool when the high is at most. Collapsed **Safety overrides**: Heat anyway below, Cool anyway above | Weather/outdoor-temperature input and seasonal heat/cool lockouts, with the heat-anyway and cool-anyway limits. |
 | **Away and setpoint limits** | Away low limit, Away high limit. Collapsed **Head setpoint range**: Lowest setpoint, Highest setpoint | **Away low / high limit**: protection thresholds used by eco and the default standby hold. Keep the equipment's own safeguards. **Lowest / Highest setpoint**: the head's allowed range. Commands are also bounded by usable head limits. |
@@ -579,7 +579,9 @@ numbers: `nan` and `±inf` are rejected.
 - Mode switch threshold, Allowed drift, Minimum time between mode switches and Coil
   drying time cannot be negative.
 - Zero is allowed for the threshold and the two durations.
-- Allowed drift also has its selector's 0.5–5 °F / 0.25–2.5 °C bounds.
+- Allowed drift also has its selector's 0.5–5 °F / 0.25–2.5 °C bounds, and so do
+  Let it get cooler by and Let it get warmer by. Those two may be left blank; emptying
+  one removes its saved value.
 - Negative Celsius temperatures are legitimate in temperature fields.
 
 **Pairs.** Each pair sits on one page:
@@ -726,6 +728,7 @@ target uses the head's setpoint when readable; 70 °F / 21 °C is the fallback.
 enter today's global value. Press **Follow global drift** to remove that override. The
 number updates immediately; the ordinary debounced recompute can then change demand and
 head output. The button is unavailable until its drift number is loaded and available.
+To let rooms drift further one way than the other, see [Uneven drift](#uneven-drift).
 
 **Shared mode** offers `cool` and `heat`.
 
@@ -762,6 +765,26 @@ could spend too early. After a room coasts, a follow-up refresh lets it progress
 without needing a head echo.
 
 </details>
+
+### Uneven drift
+
+Allowed drift is the same distance either way. To let rooms wander further one way
+than the other, set **Let it get cooler by** (how far below target before heating
+starts) and **Let it get warmer by** (how far above target before cooling starts) in
+Configure → Comfort → Advanced. Each takes 0.5–5 °F / 0.25–2.5 °C. Leave one blank to
+use Allowed drift on that side; both blank is ordinary Allowed drift.
+
+These only move where a run starts. A run always goes back to the target. With target
+70 and warmer by 5, cooling starts above 75 and runs down to 70. To have it stop at 73,
+set the target to 73.
+
+A room's own drift number replaces both values for that room, the same distance either
+way; **Follow global drift** hands the room back to them. A room still needs to be off
+target by the mode switch threshold, or that side's drift if it is wider, before the
+whole system switches between heating and cooling for it. The plan sensor's `zones`
+list shows the values in use per room as `drift_heat` (cooler by) and `drift_cool`
+(warmer by), beside `drift`. Nothing changes on the room's tile, which keeps one
+target.
 
 ### Run one room from its own remote
 
