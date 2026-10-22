@@ -63,7 +63,7 @@ Use [Reconfigure](#reconfigure-heads-rooms-and-sensors) to change the room list 
 
 - [What it does](#what-it-does), and
   [the problem it solves](#the-problem-stock-auto-starves-rooms)
-- [What's new in 3.7.1](#whats-new-in-371)
+- [What's new in 3.8.0](#whats-new-in-380)
 - [Before you install](#before-you-install) · [Install](#install)
 - [Set up your outdoor unit](#set-up-your-outdoor-unit) ·
   [If setup stops or warns](#if-setup-stops-or-warns)
@@ -149,9 +149,37 @@ supported hardware and setup apply. It is not tested for parity with this integr
 
 </details>
 
-## What's new in 3.7.1
+## What's new in 3.8.0
 
-Released October 21, 2026.
+Released October 22, 2026.
+
+- **Let it get cooler by and Let it get warmer by.** Two optional settings in
+  Configure → Comfort → Advanced let a room drift further one way than the other before
+  a head starts: how far below target before heating starts, and how far above target
+  before cooling starts. Each takes 0.5–5 °F / 0.25–2.5 °C. Both are blank by default,
+  and a blank side uses Allowed drift, so nothing changes unless you set one. A room's
+  own drift number overrides both for that room. A run still goes back to the target.
+  There is no migration and no new entity; the plan sensor's `zones` list gains
+  `drift_heat` and `drift_cool`. The idea grew out of
+  [@csingley](https://github.com/csingley)'s dual-setpoint proposal
+  ([#35](https://github.com/dkpnw/ha-mxz-coordinator/pull/35)). See
+  [Uneven drift](#uneven-drift) and
+  [Uneven drift (3.8.0)](docs/MIGRATION.md#uneven-drift-380).
+- **Hardware test: the start decision on the heat side.** On our two-head MXZ (Home
+  Assistant 2026.10.2), a bedroom at 62.8–63.0 °F with a 65 °F target stayed idle with
+  Let it get cooler by set to 3 (heat starts below 62.0), and MXZ started heating it at
+  once when it was set to 2 (heat starts below 63.0). The other room, which has its own
+  drift number, didn't change, and clearing both settings put everything back as it
+  was. We didn't test Let it get warmer by, the cool side, or a full run back to target
+  on hardware; tests cover those.
+- **CONTRIBUTING.md** explains MXZ's design principles (one target per room, no mode
+  selection, and defaults that just work) and what to do before opening a pull request.
+- **Docs.** The README and CONTRIBUTING use the Oxford comma throughout, the README
+  explains how a room's drift number reads beside the new settings, and
+  [Diagnose a room that is waiting](#diagnose-a-room-that-is-waiting) has a row for
+  `drift_heat` and `drift_cool`.
+
+From 3.7.1:
 
 - **The mode-change wait runs on a monotonic clock.** The wait between heat and cool
   is now timed by a clock that only counts forward, not by the time of day. A jump
@@ -1601,7 +1629,7 @@ MXZ Coordinator got this good because people ran it on their own systems, found 
 - [@helicopterrun](https://github.com/helicopterrun) validated it on 3-zone hardware and did relentless, root-caused QA through the v3 beta ([#4](https://github.com/dkpnw/ha-mxz-coordinator/issues/4), [#5](https://github.com/dkpnw/ha-mxz-coordinator/issues/5), [#6](https://github.com/dkpnw/ha-mxz-coordinator/issues/6), [#7](https://github.com/dkpnw/ha-mxz-coordinator/issues/7)). Those reports led to the removal docs, single-setpoint head support, and entry-scoped restore.
 - [@oliverbrandmueller](https://github.com/oliverbrandmueller) asked for metric units ([#2](https://github.com/dkpnw/ha-mxz-coordinator/issues/2)). Since 2.8.0 the coordinator runs in your Home Assistant temperature unit from end to end.
 - **mw1029** on the [Home Assistant forum](https://community.home-assistant.io/t/1018382) tried MXZ with the cloud-based `comfort_HA` integration and posted both entity dumps, which showed exactly where the two don't line up. Support for it is in progress.
-- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author, and he tested it on his own 4-zone MXZ-4C36NA2 before release. It shipped in 3.6.0. He then designed and wrote the safety-priority arbitration ([#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31)): every room's heat or cool want ranked in one priority order, with an optional per-room **Safety priority** sensor that lifts a room's own want above every other room's. It shipped in 3.7.0, not yet tested on hardware. The 3.7.0 freeze floor and overheat ceiling build on his safety tier: a tripped floor or ceiling is one more want in that same priority order, with the freeze floor ranked first. He also wrote [#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32), which times the mode-change wait with a monotonic clock so a wall-clock jump (an NTP correction, a clock set by hand) can't shorten or stretch it. It shipped in 3.7.1. His native dual-setpoint proposal ([#35](https://github.com/dkpnw/ha-mxz-coordinator/pull/35)) was declined to keep one target, but the discussion led to **Let it get cooler by** and **Let it get warmer by**, which give heat and cool different tolerances around that one target; they are coming, not yet released.
+- [@csingley](https://github.com/csingley) (Chris Singley) noticed that a room left to its own remote is invisible to the heat-versus-cool standoff, even while it is really heating or cooling on the shared outdoor unit, and sent a fix with a test ([#27](https://github.com/dkpnw/ha-mxz-coordinator/pull/27)). He followed it with [#28](https://github.com/dkpnw/ha-mxz-coordinator/pull/28), which lets a disabled room's head stay under its own remote. The per-room **Let its own remote run it while disabled** setting is built from both, with him as co-author, and he tested it on his own 4-zone MXZ-4C36NA2 before release. It shipped in 3.6.0. He then designed and wrote the safety-priority arbitration ([#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31)): every room's heat or cool want ranked in one priority order, with an optional per-room **Safety priority** sensor that lifts a room's own want above every other room's. It shipped in 3.7.0, not yet tested on hardware. The 3.7.0 freeze floor and overheat ceiling build on his safety tier: a tripped floor or ceiling is one more want in that same priority order, with the freeze floor ranked first. He also wrote [#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32), which times the mode-change wait with a monotonic clock so a wall-clock jump (an NTP correction, a clock set by hand) can't shorten or stretch it. It shipped in 3.7.1. His native dual-setpoint proposal ([#35](https://github.com/dkpnw/ha-mxz-coordinator/pull/35)) was declined to keep one target, but the discussion led to **Let it get cooler by** and **Let it get warmer by**, which give heat and cool different tolerances around that one target. They shipped in 3.8.0.
 
 **Prior art and references**
 

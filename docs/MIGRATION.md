@@ -1,6 +1,6 @@
 # Upgrading and migrating MXZ Coordinator
 
-## Uneven drift (unreleased)
+## Uneven drift (3.8.0)
 
 Two optional settings in Configure → Comfort → Advanced: **Let it get cooler by** and
 **Let it get warmer by**, stored as `drift_cooler_by` and `drift_warmer_by` only when
