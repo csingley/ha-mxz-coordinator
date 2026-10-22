@@ -158,6 +158,11 @@ def zone_slug(index: int) -> str:
 # --- Options keys (tunable constants; were hardcoded in the YAML package) ---
 CONF_DEMAND_THRESHOLD = "demand_threshold"
 CONF_ENGAGE_DEADBAND = "engage_deadband"
+# Optional uneven drift: how far below target before heat starts, and above
+# target before cool starts. No default and no key when blank: blank means
+# CONF_ENGAGE_DEADBAND, so an install that never sets them runs as before.
+CONF_DRIFT_COOLER_BY = "drift_cooler_by"
+CONF_DRIFT_WARMER_BY = "drift_warmer_by"
 CONF_MODE_HYSTERESIS = "mode_hysteresis"
 CONF_ECO_COOL_MAX = "eco_cool_max"
 CONF_ECO_HEAT_MIN = "eco_heat_min"

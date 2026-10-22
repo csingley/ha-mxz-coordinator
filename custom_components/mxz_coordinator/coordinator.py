@@ -57,6 +57,8 @@ from .const import (
     CONF_COIL_DRY_MINUTES,
     CONF_COOL_LOCKOUT_CEILING,
     CONF_DEMAND_THRESHOLD,
+    CONF_DRIFT_COOLER_BY,
+    CONF_DRIFT_WARMER_BY,
     CONF_ECO_COOL_MAX,
     CONF_ECO_HEAT_MIN,
     CONF_ENGAGE_DEADBAND,
@@ -431,6 +433,16 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.engage_deadband: float = min(
             max(float(conf.get(CONF_ENGAGE_DEADBAND, _defaults[CONF_ENGAGE_DEADBAND])), _emin),
             _emax,
+        )
+        # Uneven drift: None (no key) means Allowed drift on that side. A
+        # stored value is clamped into the same bounds, for the same reason.
+        # One that isn't a finite number reads as blank: setup must not fail
+        # on it, and the Configure menu names it so it can be fixed.
+        self.drift_cooler_by: float | None = _drift_side(
+            conf.get(CONF_DRIFT_COOLER_BY), _emin, _emax
+        )
+        self.drift_warmer_by: float | None = _drift_side(
+            conf.get(CONF_DRIFT_WARMER_BY), _emin, _emax
         )
         self.hysteresis: int = conf.get(CONF_MODE_HYSTERESIS, DEFAULT_MODE_HYSTERESIS)
         self.eco_cool_max: float = conf.get(
@@ -960,6 +972,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         votes: list[str | None] = []
         arb_demands: list[Demand] = []
         floors: list[str | None] = []
+        sides: list[tuple[float, float]] = []
         all_ok = True
         coasted = False
         for i, zone in enumerate(self.zones):
@@ -972,14 +985,18 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # what the room loses is authority, not its last measurement.
             ok = valid and health != HEALTH_STALE
             all_ok = all_ok and ok
-            zdrift = self.zone_drift(zone)
+            heat_drift, cool_drift = self.zone_drift_sides(zone)
+            sides.append((heat_drift, cool_drift))
             demand = room_call(
                 temp=temp, target=zone.target, enabled=zone.enable,
                 # A room's demand vote respects its OWN drift (#18): a room
                 # told to tolerate a wide band must not steer the shared
                 # compressor inside it. max() reproduces today's behavior
                 # exactly whenever drift <= demand_threshold (the default).
-                sensor_ok=ok, band=max(self.demand_threshold, zdrift),
+                # Per side, so a wide "warmer by" also holds back cool demand.
+                sensor_ok=ok,
+                heat_band=max(self.demand_threshold, heat_drift),
+                cool_band=max(self.demand_threshold, cool_drift),
                 neutral=DEMAND_NEUTRAL,
                 **common,
             )
@@ -1017,7 +1034,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             engage = engage_with_latch(
                 prior=prior_engage or None,
                 temp=temp, target=zone.target, enabled=zone.enable,
-                sensor_ok=ok, band=zdrift, neutral=ENGAGE_SATISFIED,
+                sensor_ok=ok, heat_band=heat_drift, cool_band=cool_drift,
+                neutral=ENGAGE_SATISFIED,
                 **common,
             )
             if zone.slug in self._engage_latch:
@@ -1092,6 +1110,10 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "target": zone.target,
                         "enabled": zone.enable,
                         "drift": self.zone_drift(zone),
+                        # The drift in use below / above target (the same as
+                        # "drift" unless uneven drift is set).
+                        "drift_heat": sides[i][0],
+                        "drift_cool": sides[i][1],
                         "fan_hold": not self.fan_auto_is_on(zone.climate_id),
                         "sensor_health": healths[i],
                         "sensor_age": None if ages[i] is None else int(ages[i]),
@@ -4098,6 +4120,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def zone_drift(self, zone: Zone) -> float:
         """The zone's re-engage drift: its own override, else the global.
 
+        The symmetric value the room's drift number shows; what starts a run
+        on each side is :meth:`zone_drift_sides`.
+
         Clamped to the unit profile's bounds at READ, same as the global — a
         restored or hand-edited value must not collapse the coast window or
         park a room degrees off target.
@@ -4106,6 +4131,23 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return self.engage_deadband
         lo, hi = self._profile["engage_bounds"]
         return min(max(float(zone.drift), lo), hi)
+
+    def zone_drift_sides(self, zone: Zone) -> tuple[float, float]:
+        """The drift in use per side: (below target before heat, above before cool).
+
+        The one place that decides it; every start decision reads it. A room's
+        own drift number replaces both sides, so presence automations keep
+        working unchanged. Otherwise each side is its global "cooler by" /
+        "warmer by", and a blank one is Allowed drift: with both blank this is
+        (zone_drift, zone_drift), exactly the single drift of before.
+        """
+        if zone.drift is not None:
+            drift = self.zone_drift(zone)
+            return drift, drift
+        return (
+            self.engage_deadband if self.drift_cooler_by is None else self.drift_cooler_by,
+            self.engage_deadband if self.drift_warmer_by is None else self.drift_warmer_by,
+        )
 
     def reset_engage_latch(self, slug: str) -> None:
         """Forget a zone's engage latch (its target changed -> fresh decision).
@@ -4325,6 +4367,23 @@ def _floor_window(value: Any) -> tuple[tuple[float, float], ...]:
     if len(pairs) != len(value) or any(None in pair for pair in pairs):
         return ()
     return tuple(pairs)
+
+
+def _drift_side(value: Any, low: float, high: float) -> float | None:
+    """A stored uneven-drift side clamped into ``[low, high]``, or None (blank).
+
+    Read like Allowed drift (a numeric string counts), but anything that isn't
+    a finite number is blank rather than an error.
+    """
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return min(max(number, low), high)
 
 
 def _finite(value: Any) -> float | None:
