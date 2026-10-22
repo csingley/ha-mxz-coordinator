@@ -79,6 +79,8 @@ from .const import (
     RESTING_BIAS_OPTIONS,
     UNAVAILABLE_STATES,
     ZONE_CLIMATE,
+    ZONE_DRIFT_COOLER_BY,
+    ZONE_DRIFT_WARMER_BY,
     ZONE_ENTITY_SUFFIXES,
     ZONE_EVIDENCE_BASIS,
     ZONE_FLOOR_HIGH,
@@ -580,6 +582,16 @@ _FRESHNESS_SECTION = "freshness"
 # in a collapsed section. Blank by default; a blank field stores no key.
 _FLOOR_FIELDS = (("floor_low", ZONE_FLOOR_LOW), ("floor_high", ZONE_FLOOR_HIGH))
 _FLOOR_SECTION = "floor"
+# The room page's optional uneven drift (flow key, zone key), in a collapsed
+# section. Blank by default; a blank field stores no key, so the side falls
+# through to the room's drift number, then the global side, then Allowed drift.
+# The flow keys differ from the global CONF_DRIFT_* keys on purpose: flow keys
+# are scrubbed from flat storage, and the global ones are stored flat.
+_ROOM_DRIFT_FIELDS = (
+    ("room_cooler_by", ZONE_DRIFT_COOLER_BY),
+    ("room_warmer_by", ZONE_DRIFT_WARMER_BY),
+)
+_DRIFT_SECTION = "drift"
 # Comfort's optional uneven drift. Blank by default; a blank field stores no
 # key (Allowed drift applies), and clearing one removes the saved key.
 _BLANK_CLEARS = (CONF_DRIFT_COOLER_BY, CONF_DRIFT_WARMER_BY)
@@ -648,7 +660,11 @@ def _flow_only_keys() -> frozenset[str]:
     would shadow it in the coordinator's {**data, **options} merge.
     """
     room_keys = {
-        key for key, _ in _ROOM_WIRING_FIELDS + _FRESHNESS_ZONE_FIELDS + _FLOOR_FIELDS
+        key
+        for key, _ in _ROOM_WIRING_FIELDS
+        + _FRESHNESS_ZONE_FIELDS
+        + _FLOOR_FIELDS
+        + _ROOM_DRIFT_FIELDS
     }
     room_keys.add(_HANDS_OFF_FIELD)
     section_keys = {key for _, groups in _PAGES.values() for key in groups}
@@ -658,7 +674,10 @@ def _flow_only_keys() -> frozenset[str]:
         for key in room_keys
     }
     return frozenset(
-        room_keys | section_keys | slot_keys | {_FRESHNESS_SECTION, _FLOOR_SECTION}
+        room_keys
+        | section_keys
+        | slot_keys
+        | {_FRESHNESS_SECTION, _FLOOR_SECTION, _DRIFT_SECTION}
     )
 
 
@@ -749,6 +768,7 @@ def _room_view(zone: dict[str, Any]) -> dict[str, Any]:
     view[_HANDS_OFF_FIELD] = zone.get(ZONE_HANDS_OFF) is True
     view.update(_zone_freshness_profile(zone))
     view.update({key: zone.get(zone_key) for key, zone_key in _FLOOR_FIELDS})
+    view.update({key: zone.get(zone_key) for key, zone_key in _ROOM_DRIFT_FIELDS})
     return view
 
 
@@ -779,20 +799,57 @@ def _floor_error(values: dict[str, Any], temperature_unit: str) -> bool:
     return False
 
 
+def _room_drift_error(values: dict[str, Any]) -> bool:
+    """Whether a submitted room side is not a finite number.
+
+    Blank is fine (the side falls through). The selector already refuses a
+    value outside the drift bounds, but NaN passes its bounds, as on Comfort.
+    """
+    for key, _ in _ROOM_DRIFT_FIELDS:
+        raw = values.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return True
+        if not math.isfinite(value):
+            return True
+    return False
+
+
 def _room_schema(
     view: dict[str, Any],
     expanded: bool = False,
     temperature_unit: str = UnitOfTemperature.FAHRENHEIT,
     floor_expanded: bool = False,
+    drift_expanded: bool = False,
 ) -> vol.Schema:
-    """The room page: wiring at the top, the freshness profile and the
-    freeze floor / overheat ceiling in sections.
+    """The room page: wiring at the top, then the room's uneven drift, the
+    freshness profile, and the freeze floor / overheat ceiling in sections.
 
     Suggested values show what is wired now, and an untouched field is
     submitted back with its value, so only an explicit clear removes wiring.
-    The floor fields suggest only a value already stored: blank stays blank,
-    so saving a room page for anything else never sets a floor.
+    The floor and drift fields suggest only a value already stored: blank
+    stays blank, so saving a room page for anything else never sets one.
     """
+    engage_min, engage_max = unit_profile(
+        temperature_unit == UnitOfTemperature.CELSIUS
+    )["engage_bounds"]
+    # The same box Comfort's Allowed drift and uneven drift use.
+    drift_box = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            mode=selector.NumberSelectorMode.BOX,
+            min=engage_min,
+            max=engage_max,
+            step=engage_min / 2,
+            unit_of_measurement=temperature_unit,
+        )
+    )
+    drift = {
+        vol.Optional(key, description={"suggested_value": view.get(key)}): drift_box
+        for key, _ in _ROOM_DRIFT_FIELDS
+    }
     floor = {
         vol.Optional(key, description={"suggested_value": view.get(key)}): _num(
             temperature_unit
@@ -842,6 +899,9 @@ def _room_schema(
             vol.Optional(
                 _HANDS_OFF_FIELD, default=view.get(_HANDS_OFF_FIELD) is True
             ): selector.BooleanSelector(),
+            vol.Required(_DRIFT_SECTION): section(
+                vol.Schema(drift), {"collapsed": not drift_expanded}
+            ),
             vol.Required(_FRESHNESS_SECTION): section(
                 vol.Schema(freshness), {"collapsed": not expanded}
             ),
@@ -1323,11 +1383,31 @@ def _attention(
                 problem_text = f'the saved "{_FIELD_LABELS[field]}" isn\'t a number'
             items.append(f"{problem_text}. Open {_PAGE_NAMES[page]} to fix it.")
     for index, zone in enumerate(zones):
+        name = _room_name(zone, index)
         profile = _zone_freshness_profile(zone)
         if profile and _freshness_error(profile):
-            name = _room_name(zone, index)
             items.append(
                 f"the saved sensor freshness for {name} doesn't fit together."
+                f" Open Rooms, then {name}, to fix it."
+            )
+        # A room's own uneven drift, worded and checked like the global sides.
+        room_drift = {
+            field: zone[zone_key]
+            for field, zone_key in (
+                (CONF_DRIFT_COOLER_BY, ZONE_DRIFT_COOLER_BY),
+                (CONF_DRIFT_WARMER_BY, ZONE_DRIFT_WARMER_BY),
+            )
+            if zone.get(zone_key) is not None
+        }
+        room_errors = _validate_tunables(room_drift)
+        for field in room_drift:
+            if (error := room_errors.get(field)) is None:
+                continue
+            problem_text = (
+                "is negative" if error == "must_not_be_negative" else "isn't a number"
+            )
+            items.append(
+                f'the saved "{_FIELD_LABELS[field]}" for {name} {problem_text}.'
                 f" Open Rooms, then {name}, to fix it."
             )
     if not items:
@@ -2351,7 +2431,8 @@ class MXZOptionsFlow(OptionsFlow):
     async def async_step_room(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """One room's vanes, airflow sensor, hands-off opt-in and sensor freshness.
+        """One room's vanes, airflow sensor, hands-off opt-in, uneven drift,
+        sensor freshness, and freeze floor / overheat ceiling.
 
         These are flow-input only: they fold into this room's record in the
         zones list, never into flat keys (a stale flat key would shadow the
@@ -2402,6 +2483,16 @@ class MXZOptionsFlow(OptionsFlow):
                 errors={"base": "floor_out_of_range"},
                 description_placeholders=title,
             )
+        if _room_drift_error(values):
+            # On the section key: the frontend drops field errors in sections.
+            return self.async_show_form(
+                step_id="room",
+                data_schema=_room_schema(
+                    values, temperature_unit=unit, drift_expanded=True
+                ),
+                errors={_DRIFT_SECTION: "not_a_number"},
+                description_placeholders=title,
+            )
         # Every field is rendered and a pre-filled field the user leaves
         # untouched is submitted with its value, so an ABSENT/empty key means
         # the user cleared it -> drop it from the room. (Skipping absent keys
@@ -2432,6 +2523,12 @@ class MXZOptionsFlow(OptionsFlow):
                 zone[zone_key] = value
         # A blank floor field stores no key (no floor); clearing one removes it.
         for key, zone_key in _FLOOR_FIELDS:
+            if values.get(key) in (None, ""):
+                zone.pop(zone_key, None)
+            else:
+                zone[zone_key] = float(values[key])
+        # Likewise a blank side stores no key; clearing one removes it.
+        for key, zone_key in _ROOM_DRIFT_FIELDS:
             if values.get(key) in (None, ""):
                 zone.pop(zone_key, None)
             else:

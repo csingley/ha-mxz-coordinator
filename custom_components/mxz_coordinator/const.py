@@ -89,6 +89,12 @@ ZONE_SAMPLE_SEQUENCE_ATTR = "sample_sequence_attribute"
 # these keys existed has no floor, and a blank field stores no key.
 ZONE_FLOOR_LOW = "floor_low"
 ZONE_FLOOR_HIGH = "floor_high"
+# Optional per-room uneven drift: this room's own "Let it get cooler by" /
+# "Let it get warmer by" (the global CONF_DRIFT_* sides, for one room). Absent =
+# none: every entry stored before these keys existed is unchanged, and a blank
+# field stores no key. Clamped on load into the profile's engage_bounds.
+ZONE_DRIFT_COOLER_BY = "drift_cooler_by"
+ZONE_DRIFT_WARMER_BY = "drift_warmer_by"
 # The values the room page accepts, per unit system: (low min, low max, high
 # min, high max). A floor outside these is rejected, never clamped.
 FLOOR_RANGE_F = (35.0, 65.0, 75.0, 100.0)

@@ -58,6 +58,7 @@ SECTION_FIELDS: dict[str, tuple[str, ...]] = {
 }
 # Room-page-only sections (no global page owns them).
 ROOM_SECTION_FIELDS: dict[str, tuple[str, ...]] = {
+    "drift": ("room_cooler_by", "room_warmer_by"),
     "floor": ("floor_low", "floor_high"),
 }
 ROOM_FIELDS: tuple[str, ...] = (
@@ -66,6 +67,7 @@ ROOM_FIELDS: tuple[str, ...] = (
     "vane_horizontal",
     "safety_priority_entity",
     "hands_off",
+    *ROOM_SECTION_FIELDS["drift"],
     *SECTION_FIELDS["freshness"],
     *ROOM_SECTION_FIELDS["floor"],
 )

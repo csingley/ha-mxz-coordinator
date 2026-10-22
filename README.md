@@ -533,7 +533,7 @@ on a menu of six pages. Some settings sit in a collapsed section on their page.
 | **Seasons** | Weather source, Lock out heat when the high is at least, Lock out cool when the high is at most. Collapsed **Safety overrides**: Heat anyway below, Cool anyway above | Weather/outdoor-temperature input and seasonal heat/cool lockouts, with the heat-anyway and cool-anyway limits. |
 | **Away and setpoint limits** | Away low limit, Away high limit. Collapsed **Head setpoint range**: Lowest setpoint, Highest setpoint | **Away low / high limit**: protection thresholds used by eco and the default standby hold. Keep the equipment's own safeguards. **Lowest / Highest setpoint**: the head's allowed range. Commands are also bounded by usable head limits. |
 | **Standby hold** | Hold signal, Active state, During a hold | An external signal that holds enabled coordination in `eco`, `off`, or `fan_only`. Missing/unknown/unavailable input releases the hold. |
-| **Rooms** | A submenu with one page per room, in priority order, titled by the room's name: Airflow sensor, Vertical vane, Horizontal vane. Collapsed **Sensor freshness**: the six freshness fields | **Room vanes and airflow sensor**: correct detection, select another entity, or clear a field to remove that optional wiring. **Sensor freshness**: see [Choose a sensor freshness contract](#choose-a-sensor-freshness-contract). |
+| **Rooms** | A submenu with one page per room, in priority order, titled by the room's name: Airflow sensor, Vertical vane, Horizontal vane. Collapsed **Uneven drift**: Let it get cooler by, Let it get warmer by. Collapsed **Sensor freshness**: the six freshness fields | **Room vanes and airflow sensor**: correct detection, select another entity, or clear a field to remove that optional wiring. **Uneven drift**: optional, this room's own sides; see [Per-room uneven drift](#per-room-uneven-drift). **Sensor freshness**: see [Choose a sensor freshness contract](#choose-a-sensor-freshness-contract). |
 
 **How saving works**
 
@@ -806,11 +806,13 @@ These only move where a run starts. A run always goes back to the target. With t
 70 and warmer by 5, cooling starts above 75 and runs down to 70. To have it stop at 73,
 set the target to 73.
 
-A room's own drift number replaces both values for that room, the same distance either
-way; **Follow global drift** hands the room back to them. A room's drift number keeps
-showing Allowed drift even while the room is using **Let it get cooler by** or **Let it
-get warmer by**, until you give that room its own drift; the values in use are
-`drift_heat` and `drift_cool` on the plan sensor. A room still needs to be off
+A room's own drift number, once you or an automation set it, replaces both values for
+that room, the same distance either way; **Follow global drift** hands the room back to
+them. A room's drift number keeps showing Allowed drift even while the room is using
+**Let it get cooler by** or **Let it get warmer by**, until you give that room its own
+drift; the values in use are `drift_heat` and `drift_cool` on the plan sensor and on
+the drift number itself. A room can also have its own values for either side; see
+[Per-room uneven drift](#per-room-uneven-drift). A room still needs to be off
 target by the mode switch threshold, or that side's drift if it is wider, before the
 whole system switches between heating and cooling for it. The plan sensor's `zones`
 list shows the values in use per room as `drift_heat` (cooler by) and `drift_cool`
@@ -828,10 +830,45 @@ moves its side out to **Heat anyway below** or **Cool anyway above**.
 `start_points_mode` reads `comfort` or `eco`, and
 `start_points_lockouts` lists any lockout in use (`heat`, `cool`, or both).
 `drift_heat_from` and `drift_cool_from` say where each side's drift comes from
-(`room`, `cooler_by`, `warmer_by`, or `allowed_drift`), and `drift_source` is `room`
-or `global`. A disabled room shows no start points. The room's thermostat carries the
+(`room_cooler_by`, `room_warmer_by`, `room`, `cooler_by`, `warmer_by`, or
+`allowed_drift`; see [Per-room uneven drift](#per-room-uneven-drift)), and
+`drift_source` is `room` when either side comes from the room, else `global`. A disabled room shows no start points. The room's thermostat carries the
 same values as extra attributes. They are read-only, and the tile, Apple Home, Google
 Home, and Alexa still see one target.
+
+#### Per-room uneven drift
+
+For power users: any room can have its own **Let it get cooler by** and **Let it get
+warmer by**, in Configure → Rooms → (room), in the collapsed **Uneven drift** section.
+Each takes 0.5–5 °F / 0.25–2.5 °C and is blank by default. A blank side stores nothing,
+and emptying a box removes that side.
+
+For each side, MXZ uses the first of these that is set:
+
+1. The room's own value on this page.
+2. The room's drift number, but only once you or an automation set it. A room that
+   was never set, or that you handed back with **Follow global drift**, is not set,
+   even though its drift number shows Allowed drift. Setting the number to exactly
+   Allowed drift does count as set, because someone chose it; press **Follow global
+   drift** to undo that.
+3. **Let it get cooler by** or **Let it get warmer by** in Configure → Comfort →
+   Advanced.
+4. Allowed drift.
+
+Each side falls through on its own. For example, with Comfort's cooler by 3 and warmer
+by 5, a room with its own warmer by 2 starts cooling 2 above target and heating 3
+below. Write 1.5 to that room's drift number, and it starts heating 1.5 below while
+still cooling at 2 above. Leave both of a room's sides blank and nothing changes for
+it. As with the global settings, a run still goes back to the target, and the room asks
+the whole system to switch only past the mode switch threshold, or that side's drift
+if it is wider.
+
+The room's drift number still shows a single value, so presence automations that write
+to it work as before. Its `drift_heat` and `drift_cool` attributes, like the plan
+sensor's, show the drift in use on each side. `drift_heat_from` and `drift_cool_from`
+read `room_cooler_by` or `room_warmer_by` for a side that comes from this page, and
+`room` for one that comes from the room's drift number. `drift_source` is `room` when
+either side comes from the room, else `global`.
 
 ### Run one room from its own remote
 
@@ -1280,7 +1317,7 @@ refer to priority slots, not permanent room identities.
 | Observation | Meaning and next step |
 | --- | --- |
 | `standoff`, demand/engage, mode dwell | Another room's priority or dwell may be holding the direction. Check targets and priority before changing a raw head. |
-| room `drift_heat`, `drift_cool` | How far below (heat) and above (cool) target the room may get before a run starts: Let it get cooler by and Let it get warmer by, Allowed drift on a blank side, or the room's own drift on both. The room's drift number still shows Allowed drift. See [Uneven drift](#uneven-drift). |
+| room `drift_heat`, `drift_cool` | How far below (heat) and above (cool) target the room may get before a run starts: per side, the room's own Let it get cooler by or Let it get warmer by, else the room's drift number once set, else the global Let it get cooler by or Let it get warmer by, else Allowed drift. The room's drift number still shows one value, with these two as its attributes. See [Uneven drift](#uneven-drift). |
 | room `heat_start`, `cool_start`, `heat_demand_below`, `cool_demand_above` | Where the room starts a run (heats below `heat_start`, cools above `cool_start`) and where it asks the whole system to switch (below `heat_demand_below`, above `cool_demand_above`), as MXZ uses them now. `start_points_mode` is `comfort` or `eco`, `start_points_lockouts` lists a heat or cool lockout in use, and `drift_source`, `drift_heat_from`, and `drift_cool_from` say where the drift came from. For a disabled room, the four edges and `start_points_mode` are `null`, and `start_points_lockouts` is `[]`. The edges are shown rounded to six decimal places; MXZ compares the unrounded values. Also on the room's thermostat. See [Uneven drift](#uneven-drift). |
 | `mode_by_hands_off`, room `hands_off_vote` | True when a disabled room run from its own remote set the shared mode, with no enabled room calling or still running to its target, or the mode went back after its vote ended; that change starts no mode-change wait. Always false with no room opted in. See [Run one room from its own remote](#run-one-room-from-its-own-remote). |
 | `mode_by_safety`, room `safety_priority` | True while a room marked Safety priority is asserting and its want is the shared mode, or a tripped freeze floor or overheat ceiling's is. Taking the mode from an enabled room that is calling or still running to its target starts the mode-change wait like any real reversal; deciding while no enabled room is calling or running does not. Always false with no sensor wired and no floor tripped. See [Safety priority](#safety-priority). |
