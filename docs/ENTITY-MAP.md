@@ -51,7 +51,8 @@ the same computed plan.
 | Room `climate.*_thermostat` and `sensor.*_plan` → `zones[]` | `heat_start`, `cool_start` | The room's head starts heating below `heat_start`, or cooling above `cool_start`, while the outdoor unit is in that mode. `null` for a disabled room. |
 | Same room surfaces | `heat_demand_below`, `cool_demand_above` | Below or above these, the room asks the outdoor unit to switch to heating or cooling. `null` for a disabled room. |
 | Same room surfaces | `start_points_mode`, `start_points_lockouts` | `comfort` or `eco` (eco uses Away low limit and Away high limit), and the heat or cool lockouts that move a side out to Heat anyway below or Cool anyway above. `null` and empty for a disabled room. |
-| Same room surfaces | `drift_source`, `drift_heat_from`, `drift_cool_from` | `room` or `global`, and per side `room`, `cooler_by`, `warmer_by`, or `allowed_drift`. |
+| Same room surfaces | `drift_source`, `drift_heat_from`, `drift_cool_from` | `room` (either side comes from the room) or `global`, and per side `room_cooler_by` or `room_warmer_by` (the room's own side), `room` (the room's drift number), `cooler_by` or `warmer_by` (the global side), or `allowed_drift`. |
+| Room `number.*_drift` | `drift_heat`, `drift_cool` | The drift in use below and above target, the same as the plan row's. Read-only; the number's value and its `override` flag are unchanged. |
 
 These are extra attributes only. The thermostat has no `target_temp_low` or
 `target_temp_high` and keeps its single target.
