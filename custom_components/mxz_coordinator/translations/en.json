@@ -84,7 +84,7 @@
           "review": "Back to summary"
         },
         "menu_option_descriptions": {
-          "comfort": "Drift, mode switching and resting mode",
+          "comfort": "Drift, mode switching, and resting mode",
           "fan_idle": "Fan boost, and what a head does at target",
           "seasons": "Weather-based heat and cool lockouts",
           "limits": "Eco protection and the heads' setpoint range",
@@ -192,7 +192,7 @@
           "inhibit_action": "During a hold"
         },
         "data_description": {
-          "inhibit_entity": "Optional. A grid, load-shed or vacation entity. While it's active the heads hold at low power, then resume on their own. If it goes unavailable, MXZ keeps running.",
+          "inhibit_entity": "Optional. A grid, load-shed, or vacation entity. While it's active the heads hold at low power, then resume on their own. If it goes unavailable, MXZ keeps running.",
           "inhibit_active_state": "Usually on. Use off for grid sensors that read off during an outage."
         }
       },
@@ -224,14 +224,14 @@
           "room_name_8": "Room 8 name"
         },
         "data_description": {
-          "room_name_1": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
-          "room_name_2": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
-          "room_name_3": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
-          "room_name_4": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
-          "room_name_5": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
-          "room_name_6": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
-          "room_name_7": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
-          "room_name_8": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name."
+          "room_name_1": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch, and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
+          "room_name_2": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch, and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
+          "room_name_3": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch, and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
+          "room_name_4": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch, and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
+          "room_name_5": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch, and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
+          "room_name_6": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch, and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
+          "room_name_7": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch, and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name.",
+          "room_name_8": "The room name shown on this room's entities — the thermostat, the target, the drift, the enable switch, and Fan auto. Leave it empty to use the head's own name. Renaming a room here never changes an entity ID, and an entity you renamed yourself keeps your name."
         }
       },
       "reconfigure_sensors": {
@@ -286,7 +286,7 @@
       "not_a_number": "Enter a number.",
       "room_name_empty": "Every room needs a name.",
       "sensor_missing": "Home Assistant has no state for: {problem_sensors}. Make sure each sensor exists and is loaded, then pick it again.",
-      "sensor_unit_unsupported": "MXZ Coordinator cannot read the temperature unit these sensors report: {problem_sensors}. Choose a sensor that reports a temperature unit Home Assistant can convert, such as degrees Celsius, degrees Fahrenheit or kelvin.",
+      "sensor_unit_unsupported": "MXZ Coordinator cannot read the temperature unit these sensors report: {problem_sensors}. Choose a sensor that reports a temperature unit Home Assistant can convert, such as degrees Celsius, degrees Fahrenheit, or kelvin.",
       "too_many_heads": "A single MXZ outdoor unit supports at most 8 heads."
     },
     "abort": {
@@ -325,12 +325,12 @@
           "rooms": "Rooms"
         },
         "menu_option_descriptions": {
-          "comfort": "Drift, mode switching and resting mode",
+          "comfort": "Drift, mode switching, and resting mode",
           "fan_idle": "Fan boost, and what a head does at target",
           "seasons": "Weather-based heat and cool lockouts",
           "limits": "Eco protection and the heads' setpoint range",
           "standby": "Pause the heads on a grid or load-shed signal",
-          "rooms": "Vanes, airflow sensor and sensor freshness"
+          "rooms": "Vanes, airflow sensor, and sensor freshness"
         }
       },
       "comfort": {
@@ -434,7 +434,7 @@
           "inhibit_action": "During a hold"
         },
         "data_description": {
-          "inhibit_entity": "Optional. A grid, load-shed or vacation entity. While it's active the heads hold at low power, then resume on their own. If it goes unavailable, MXZ keeps running.",
+          "inhibit_entity": "Optional. A grid, load-shed, or vacation entity. While it's active the heads hold at low power, then resume on their own. If it goes unavailable, MXZ keeps running.",
           "inhibit_active_state": "Usually on. Use off for grid sensors that read off during an outage."
         }
       },

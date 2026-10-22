@@ -12,7 +12,7 @@ GitHub/PyPI, and a bootstrap Python **3.12 or newer**. The bootstrap Python only
 orchestrates setup. Tests use the exact downloaded Python **3.14.8**.
 
 Choose a new directory outside the checkout. All runtime, source clones, builds,
-downloads, HOME, temporary files, caches and command receipts stay there. The
+downloads, HOME, temporary files, caches, and command receipts stay there. The
 recipe checks free space before each workload: 2 GiB remaining growth plus 1 GiB
 concurrent-growth allowance and a 1.5 GiB reserve; at least 350,000 free inodes
 includes 100,000 prospective entries and a 250,000-inode reserve. These are planning
@@ -57,11 +57,11 @@ original CI: 3.7.1's 1,969 tests took 110 s on one hosted runner and were
 still passing at 180 s on two slower ones (about 2× per test).
 
 Do not interpret a collection, import, sentinel, or partial log as a full pass.
-For release qualification, settle the implementation, version, documentation and
+For release qualification, settle the implementation, version, documentation, and
 assets before the combined independent review and final test run. Bind the evidence
 to that final source SHA. Development commands above are not release acceptance.
 
-Backend setup, reconfigure and Configure APIs have local synthetic execution evidence,
+Backend setup, reconfigure, and Configure APIs have local synthetic execution evidence,
 including complete original full/API runs on the accepted product implementation.
 This recipe's newer Python archive and generated plugin build are distinct artifacts;
 shared package versions alone do not make them identical to earlier local runtimes.
@@ -135,7 +135,7 @@ provides `python-3.14.8-linux-26.04-x64.tar.gz`, asset 602297001, SHA256
 `53eb0aed7bfb9a3d28b0842ada81dc7b1432fd697cb35653b79156b1efd0d3fa`.
 The recipe verifies the full archive and its extracted files, and checks the
 actual executable, stdlib, libpython, site-packages, distribution metadata,
-unrelocated installed wheel members and imported modules. Ordinary and isolated-child
+unrelocated installed wheel members, and imported modules. Ordinary and isolated-child
 binding receipts are separate.
 
 `bluetooth-data-tools`, `fnv-hash-fast`, and `ulid-transform` select
@@ -157,4 +157,4 @@ continues to own its five job families and three earlier targets.
 
 A local run does not prove genuine GitHub-hosted execution. Qualification needs
 a new run attached to the independently reviewed candidate SHA; later product,
-version, documentation, UI and release checks remain separate.
+version, documentation, UI, and release checks remain separate.
