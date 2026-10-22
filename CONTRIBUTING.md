@@ -8,19 +8,23 @@ MXZ works like a Tesla's cabin climate in Auto. You set one temperature per room
 
 Home thermostats usually ask for a heat setpoint and a cool setpoint. That confuses most people, and MXZ exists to get rid of it. Simplicity is the product.
 
+Out of the box, setting a temperature is all anyone has to do: the defaults should give a comfortable room with no tuning. Under that, MXZ has deep configuration for power users who want to tinker, such as drift, uneven drift, per-room drift, fan, vane, and safety options, so they can get exactly the behavior they want without giving up the single target.
+
 ## Design principles
 
-- **One target per room.** Each room has a single temperature. MXZ won't add a dual setpoint, a heat/cool range, or a second handle on the thermostat, even as an option.
+- **One target per room.** Each room has a single temperature. MXZ won't add a dual setpoint, a heat/cool range, or a second handle on the thermostat, even as an option. Drift and uneven drift ("Let it get cooler by" and "Let it get warmer by") already give each room an adjustable band around its target. The bar for revisiting this is high: if you believe you have a use case that one target plus drift, including uneven drift, truly can't serve, open an issue first and show why.
 - **No mode selection.** MXZ picks heat or cool for the whole system. Users don't.
-- **The defaults just work.** Someone who only ever sets a temperature should get a comfortable room. Tuning settings like drift belong in the advanced options, and a new one must be optional and keep today's behavior when left blank.
-- **Honest state.** What Home Assistant, Apple Home, and Google Home show should match what the heads are really doing.
+- **The defaults just work, and power users get the knobs.** Someone who only ever sets a temperature should get a comfortable room. Tuning settings like drift belong in the advanced options, and a new one must be optional and keep today's behavior when left blank.
+- **Honest, visible state.** What Home Assistant, Apple Home, and Google Home show should match what the heads are really doing. Each room also shows, read-only, where it will start heating and where it will start cooling (`heat_start`, `cool_start`, `heat_demand_below`, and `cool_demand_above` on the plan sensor and the room's thermostat), so the band around the target is never hidden.
 - **Safe by default.** New behavior that could affect comfort or safety starts off. It also has to survive a Home Assistant restart and respect a fan speed the user picked by hand.
 
 ## Before you open a pull request
 
 - **Fixes, reliability, and safety:** go ahead and open a PR.
 - **Anything that changes how people control MXZ** (the thermostat tile, setpoints, modes, or new controls): please open an issue first so we can talk it through. A PR that changes the controls without an agreed issue will probably be closed.
+- **New tuning options:** welcome. Open an issue first, keep the option off or blank by default, and show that leaving it unset changes nothing.
 - **Tests:** keep the full test suite passing, and add tests for new behavior. Please don't weaken an existing test.
 - **Hardware:** say in the PR whether you tested on real hardware.
+- **Writing:** MXZ docs, strings, and PR text use plain English and the Oxford comma.
 
-Contributors are credited in the README. Thanks for helping keep MXZ simple.
+Contributors are credited in the README. Thanks for helping keep MXZ simple to use and rewarding to tune.
