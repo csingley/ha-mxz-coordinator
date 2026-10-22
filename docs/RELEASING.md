@@ -28,10 +28,10 @@ A release is cut by hand, in this order. Don't tag until every step above the ta
    python3 tools/credits_check.py --since v3.4.0
    ```
 
-   It lists every outside commit author, `Co-authored-by` co-author and issue or PR
+   It lists every outside commit author, `Co-authored-by` co-author, and issue or PR
    author (closed or merged since the tag) and marks each as credited or MISSING. It
-   skips the owner, agents and bots. It exits 0 when everyone is credited, 1 when
-   anyone is missing and 2 on a git, `gh` or README error. A commit whose email has no
+   skips the owner, agents, and bots. It exits 0 when everyone is credited, 1 when
+   anyone is missing, and 2 on a git, `gh`, or README error. A commit whose email has no
    GitHub account shows up as `name <email>`. A co-author's email is matched to a login
    by its GitHub noreply form, the small map in `tools/credits_check.py`
    (`KNOWN_LOGINS`), or a commit of their own in the range; one that none of these
@@ -40,7 +40,7 @@ A release is cut by hand, in this order. Don't tag until every step above the ta
 
    For every MISSING contributor, add them to the README's
    [Credits & prior art](../README.md#credits--prior-art) section:
-   - Every handle, issue, PR and forum mention is a full link.
+   - Every handle, issue, PR, and forum mention is a full link.
    - Note the release the contribution shipped in.
    - Credit work that hasn't shipped yet as "in progress".
 
