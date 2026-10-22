@@ -294,7 +294,8 @@ async def test_room_drift_overrides_both_sides_and_follow_global_restores_them(
         # Not a number: blank (Allowed drift), never a failed setup.
         ({COOLER: "warm", WARMER: float("nan")}, (None, None)),
         ({COOLER: float("inf"), WARMER: "-inf"}, (None, None)),
-        ({COOLER: True}, (1.0, None)),  # float(True), as Allowed drift reads it
+        # Documents the float() read Allowed drift uses, not an endorsed input.
+        ({COOLER: True}, (1.0, None)),
         ({COOLER: None}, (None, None)),
     ],
 )
