@@ -4471,9 +4471,10 @@ def _start_points(
     points.update(
         {
             # Rounded for display only: target - threshold can carry binary
-            # noise (62 - 4.02 is 57.980000000000004), and six places keep
-            # every value a person can enter in the UI exactly. The plan's
-            # other temperatures are entered values, shown as stored.
+            # noise (62 - 4.02 is 57.980000000000004). Six places keep any
+            # setting entered to six decimals or fewer exact; finer ones are
+            # shown to within a millionth of a degree. The plan's other
+            # temperatures are entered values, shown as stored.
             **{
                 key: round(edge, 6)
                 for key, edge in zip(
