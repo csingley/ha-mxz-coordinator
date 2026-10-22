@@ -154,6 +154,7 @@ from .logic import (
     Demand,
     FloorRun,
     arbitrate,
+    call_edges,
     engage_with_latch,
     evidence_contract,
     fan_for_delta,
@@ -973,6 +974,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         arb_demands: list[Demand] = []
         floors: list[str | None] = []
         sides: list[tuple[float, float]] = []
+        starts: list[dict[str, Any]] = []
         all_ok = True
         coasted = False
         for i, zone in enumerate(self.zones):
@@ -985,20 +987,33 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # what the room loses is authority, not its last measurement.
             ok = valid and health != HEALTH_STALE
             all_ok = all_ok and ok
-            heat_drift, cool_drift = self.zone_drift_sides(zone)
+            (heat_drift, heat_from), (cool_drift, cool_from) = (
+                self.zone_drift_sides_from(zone)
+            )
             sides.append((heat_drift, cool_drift))
+            # A room's demand vote respects its OWN drift (#18): a room
+            # told to tolerate a wide band must not steer the shared
+            # compressor inside it. max() reproduces today's behavior
+            # exactly whenever drift <= demand_threshold (the default).
+            # Per side, so a wide "warmer by" also holds back cool demand.
+            heat_demand_band = max(self.demand_threshold, heat_drift)
+            cool_demand_band = max(self.demand_threshold, cool_drift)
             demand = room_call(
                 temp=temp, target=zone.target, enabled=zone.enable,
-                # A room's demand vote respects its OWN drift (#18): a room
-                # told to tolerate a wide band must not steer the shared
-                # compressor inside it. max() reproduces today's behavior
-                # exactly whenever drift <= demand_threshold (the default).
-                # Per side, so a wide "warmer by" also holds back cool demand.
                 sensor_ok=ok,
-                heat_band=max(self.demand_threshold, heat_drift),
-                cool_band=max(self.demand_threshold, cool_drift),
+                heat_band=heat_demand_band,
+                cool_band=cool_demand_band,
                 neutral=DEMAND_NEUTRAL,
                 **common,
+            )
+            # Shown, not decided: the edges room_call just compared against.
+            starts.append(
+                _start_points(
+                    zone, common,
+                    sides=(heat_drift, cool_drift),
+                    demand_bands=(heat_demand_band, cool_demand_band),
+                    sources=(heat_from, cool_from),
+                )
             )
             if zone.slug in self._startup_resume:
                 if not (
@@ -1114,6 +1129,7 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # "drift" unless uneven drift is set).
                         "drift_heat": sides[i][0],
                         "drift_cool": sides[i][1],
+                        **starts[i],
                         "fan_hold": not self.fan_auto_is_on(zone.climate_id),
                         "sensor_health": healths[i],
                         "sensor_age": None if ages[i] is None else int(ages[i]),
@@ -2177,6 +2193,21 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
             for i, (zone, head) in enumerate(zip(self.zones, heads))
         ]
+
+    def start_points(self, zone: Zone) -> dict[str, Any]:
+        """This room's start points as of the latest computed plan.
+
+        Read from the plan the room thermostat shares with the plan sensor, so
+        both change together on the recompute a settings change requests. Each
+        key reads None until a plan exists.
+        """
+        views = (self.data or {}).get("zones", ())
+        view = next(
+            (views[i] for i, known in enumerate(self.zones)
+             if known is zone and i < len(views)),
+            {},
+        )
+        return {key: view.get(key) for key in START_POINT_KEYS}
 
     @callback
     def async_add_delivery_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -4141,12 +4172,27 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         "warmer by", and a blank one is Allowed drift: with both blank this is
         (zone_drift, zone_drift), exactly the single drift of before.
         """
+        (heat, _), (cool, _) = self.zone_drift_sides_from(zone)
+        return heat, cool
+
+    def zone_drift_sides_from(
+        self, zone: Zone
+    ) -> tuple[tuple[float, str], tuple[float, str]]:
+        """:meth:`zone_drift_sides`, each side paired with where it came from.
+
+        The precedence lives here only, so the plan's ``drift_heat_from`` /
+        ``drift_cool_from`` name the same branch that chose the value:
+        ``room`` (the room's own drift number), ``cooler_by`` / ``warmer_by``
+        (the global side), or ``allowed_drift`` (that side left blank).
+        """
         if zone.drift is not None:
             drift = self.zone_drift(zone)
-            return drift, drift
+            return (drift, "room"), (drift, "room")
         return (
-            self.engage_deadband if self.drift_cooler_by is None else self.drift_cooler_by,
-            self.engage_deadband if self.drift_warmer_by is None else self.drift_warmer_by,
+            (self.engage_deadband, "allowed_drift") if self.drift_cooler_by is None
+            else (self.drift_cooler_by, "cooler_by"),
+            (self.engage_deadband, "allowed_drift") if self.drift_warmer_by is None
+            else (self.drift_warmer_by, "warmer_by"),
         )
 
     def reset_engage_latch(self, slug: str) -> None:
@@ -4367,6 +4413,86 @@ def _floor_window(value: Any) -> tuple[tuple[float, float], ...]:
     if len(pairs) != len(value) or any(None in pair for pair in pairs):
         return ()
     return tuple(pairs)
+
+
+# The per-room start-point keys, in the plan's room rows and on the room
+# thermostat (read from the plan, never recomputed there).
+START_POINT_KEYS = (
+    "drift_source",
+    "drift_heat_from",
+    "drift_cool_from",
+    "heat_start",
+    "cool_start",
+    "heat_demand_below",
+    "cool_demand_above",
+    "start_points_mode",
+    "start_points_lockouts",
+)
+
+
+def _start_points(
+    zone: Zone,
+    common: dict[str, Any],
+    *,
+    sides: tuple[float, float],
+    demand_bands: tuple[float, float],
+    sources: tuple[str, str],
+) -> dict[str, Any]:
+    """One room's start points: the edges its engage and demand calls compare to.
+
+    ``common``, ``sides``, and ``demand_bands`` are exactly what this compute
+    passed to room_call / engage_with_latch, and :func:`call_edges` is the one
+    place those turn into edges, so the numbers shown are the numbers used.
+    The start edges are where a coasting room starts a run (a running room
+    still runs all the way to its target). A disabled room makes no call, so
+    it has no edges; a missing reading doesn't move them.
+    """
+    eco = common["eco"]
+    points: dict[str, Any] = {
+        "drift_source": "room" if sources[0] == "room" else "global",
+        "drift_heat_from": sources[0],
+        "drift_cool_from": sources[1],
+        "heat_start": None,
+        "cool_start": None,
+        "heat_demand_below": None,
+        "cool_demand_above": None,
+        "start_points_mode": None,
+        "start_points_lockouts": [],
+    }
+    if not zone.enable:
+        return points
+    edges = (
+        *call_edges(target=zone.target, heat_band=sides[0], cool_band=sides[1], **common),
+        *call_edges(
+            target=zone.target, heat_band=demand_bands[0], cool_band=demand_bands[1],
+            **common,
+        ),
+    )
+    points.update(
+        {
+            # Rounded for display only: target - threshold can carry binary
+            # noise (62 - 4.02 is 57.980000000000004). Six places keep any
+            # setting entered to six decimals or fewer exact; finer ones are
+            # shown to within a millionth of a degree. The plan's other
+            # temperatures are entered values, shown as stored.
+            **{
+                key: round(edge, 6)
+                for key, edge in zip(
+                    ("heat_start", "cool_start", "heat_demand_below", "cool_demand_above"),
+                    edges, strict=True,
+                )
+            },
+            "start_points_mode": "eco" if eco else "comfort",
+            # Eco ignores the lockouts, so they move nothing while it's on.
+            "start_points_lockouts": [] if eco else [
+                side for side, on in (
+                    (MODE_HEAT, common["heat_lockout"]),
+                    (MODE_COOL, common["cool_lockout"]),
+                ) if on
+            ],
+        }
+    )
+    return points
 
 
 def _drift_side(value: Any, low: float, high: float) -> float | None:

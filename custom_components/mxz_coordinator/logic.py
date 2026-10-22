@@ -74,21 +74,67 @@ def room_call(
         return MODE_OFF
     if not sensor_ok:
         return neutral
-    if eco:
-        if temp > eco_cool_max:
-            return MODE_COOL
-        if temp < eco_heat_min:
-            return MODE_HEAT
-        return neutral
-    if temp > target + cool_band:
-        if cool_lockout and temp <= cool_lockout_ceiling:
-            return neutral
+    # The comparisons read the same edges the plan shows (call_edges), so the
+    # displayed start points and the decision cannot disagree.
+    heat_below, cool_above = call_edges(
+        target=target, heat_band=heat_band, cool_band=cool_band, eco=eco,
+        eco_cool_max=eco_cool_max, eco_heat_min=eco_heat_min,
+        heat_lockout=heat_lockout, heat_lockout_floor=heat_lockout_floor,
+        cool_lockout=cool_lockout, cool_lockout_ceiling=cool_lockout_ceiling,
+    )
+    if temp > cool_above:
         return MODE_COOL
-    if temp < target - heat_band:
-        if heat_lockout and temp >= heat_lockout_floor:
-            return neutral
+    if temp < heat_below:
         return MODE_HEAT
     return neutral
+
+
+def call_edges(
+    *,
+    target: float,
+    heat_band: float,
+    cool_band: float,
+    eco: bool,
+    eco_cool_max: float,
+    eco_heat_min: float,
+    heat_lockout: bool,
+    heat_lockout_floor: float,
+    cool_lockout: bool,
+    cool_lockout_ceiling: float,
+) -> tuple[float, float]:
+    """The two edges :func:`room_call` compares a reading to: (heat_below, cool_above).
+
+    An enabled room with a usable reading calls cool iff ``temp > cool_above``
+    (checked first), else heat iff ``temp < heat_below``. One function decides
+    both the call and the start points the plan shows, so they can't drift.
+
+    * Eco: the eco extremes, whatever the target, bands, or lockouts.
+    * Otherwise ``target - heat_band`` / ``target + cool_band``.
+    * A lockout moves its side's edge out to the safety line: cool is held off
+      while ``temp <= cool_lockout_ceiling`` and heat while
+      ``temp >= heat_lockout_floor``, and with strict comparisons "past the
+      comfort edge AND past the line" is exactly "past the farther of the two".
+      The comfort edge is max()'s/min()'s FIRST argument, so a NaN on either
+      side resolves as the original two comparisons did.
+
+    Holding cool off can only leave a reading in the heat region if the two
+    regions overlap, i.e. a negative ``heat_band + cool_band``. The old
+    cool-first order answered "hold" there, which no pair of strict edges can
+    express, so that one combination is refused rather than answered
+    differently. No caller passes it: drift is clamped positive, the demand
+    band is at least the drift, and the latch passes 0.
+    """
+    if eco:
+        return eco_heat_min, eco_cool_max
+    heat_below = target - heat_band
+    cool_above = target + cool_band
+    if heat_lockout:
+        heat_below = min(heat_below, heat_lockout_floor)
+    if cool_lockout:
+        if heat_band + cool_band < 0:
+            raise ValueError("a cool lockout needs heat_band + cool_band >= 0")
+        cool_above = max(cool_above, cool_lockout_ceiling)
+    return heat_below, cool_above
 
 
 def engage_with_latch(

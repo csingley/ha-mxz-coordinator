@@ -41,6 +41,21 @@ automations more often. Actual recorder rows, bytes, and hourly growth have not 
 measured. See [Migration](MIGRATION.md#added-diagnostics-and-state-events) for the
 tradeoff and [README diagnostics](../README.md#diagnose-a-room-that-is-waiting) for use.
 
+## Integration start points
+
+Each room's start points, read-only, in the system temperature unit. Both surfaces read
+the same computed plan.
+
+| Entity surface | Fields | Meaning |
+| --- | --- | --- |
+| Room `climate.*_thermostat` and `sensor.*_plan` → `zones[]` | `heat_start`, `cool_start` | The room's head starts heating below `heat_start`, or cooling above `cool_start`, while the outdoor unit is in that mode. `null` for a disabled room. |
+| Same room surfaces | `heat_demand_below`, `cool_demand_above` | Below or above these, the room asks the outdoor unit to switch to heating or cooling. `null` for a disabled room. |
+| Same room surfaces | `start_points_mode`, `start_points_lockouts` | `comfort` or `eco` (eco uses Away low limit and Away high limit), and the heat or cool lockouts that move a side out to Heat anyway below or Cool anyway above. `null` and empty for a disabled room. |
+| Same room surfaces | `drift_source`, `drift_heat_from`, `drift_cool_from` | `room` or `global`, and per side `room`, `cooler_by`, `warmer_by`, or `allowed_drift`. |
+
+These are extra attributes only. The thermostat has no `target_temp_low` or
+`target_temp_high` and keeps its single target.
+
 ## Required — replace these
 
 | Placeholder in the package | What it is | Example of yours |

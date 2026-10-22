@@ -817,6 +817,22 @@ list shows the values in use per room as `drift_heat` (cooler by) and `drift_coo
 (warmer by), beside `drift`. Nothing changes on the room's tile, which keeps one
 target.
 
+Each room's plan also shows where it will start heating and cooling, worked out from
+its target, these settings, Allowed drift, its own drift number, and the mode switch
+threshold. `heat_start` and `cool_start` are where the room's head starts heating or
+cooling while the outdoor unit is already in that mode. `heat_demand_below` and
+`cool_demand_above` are where the room asks the outdoor unit to switch to heating or
+cooling. They are the numbers MXZ is using right now, in your temperature unit: with
+eco on, they are **Away low limit** and **Away high limit**, and a heat or cool lockout
+moves its side out to **Heat anyway below** or **Cool anyway above**.
+`start_points_mode` reads `comfort` or `eco`, and
+`start_points_lockouts` lists any lockout in use (`heat`, `cool`, or both).
+`drift_heat_from` and `drift_cool_from` say where each side's drift comes from
+(`room`, `cooler_by`, `warmer_by`, or `allowed_drift`), and `drift_source` is `room`
+or `global`. A disabled room shows no start points. The room's thermostat carries the
+same values as extra attributes. They are read-only, and the tile, Apple Home, Google
+Home, and Alexa still see one target.
+
 ### Run one room from its own remote
 
 **Let its own remote run it while disabled** is a per-room setting in Configure →
@@ -1265,6 +1281,7 @@ refer to priority slots, not permanent room identities.
 | --- | --- |
 | `standoff`, demand/engage, mode dwell | Another room's priority or dwell may be holding the direction. Check targets and priority before changing a raw head. |
 | room `drift_heat`, `drift_cool` | How far below (heat) and above (cool) target the room may get before a run starts: Let it get cooler by and Let it get warmer by, Allowed drift on a blank side, or the room's own drift on both. The room's drift number still shows Allowed drift. See [Uneven drift](#uneven-drift). |
+| room `heat_start`, `cool_start`, `heat_demand_below`, `cool_demand_above` | Where the room starts a run (heats below `heat_start`, cools above `cool_start`) and where it asks the whole system to switch (below `heat_demand_below`, above `cool_demand_above`), as MXZ uses them now. `start_points_mode` is `comfort` or `eco`, `start_points_lockouts` lists a heat or cool lockout in use, and `drift_source`, `drift_heat_from`, and `drift_cool_from` say where the drift came from. For a disabled room, the four edges and `start_points_mode` are `null`, and `start_points_lockouts` is `[]`. The edges are shown rounded to six decimal places; MXZ compares the unrounded values. Also on the room's thermostat. See [Uneven drift](#uneven-drift). |
 | `mode_by_hands_off`, room `hands_off_vote` | True when a disabled room run from its own remote set the shared mode, with no enabled room calling or still running to its target, or the mode went back after its vote ended; that change starts no mode-change wait. Always false with no room opted in. See [Run one room from its own remote](#run-one-room-from-its-own-remote). |
 | `mode_by_safety`, room `safety_priority` | True while a room marked Safety priority is asserting and its want is the shared mode, or a tripped freeze floor or overheat ceiling's is. Taking the mode from an enabled room that is calling or still running to its target starts the mode-change wait like any real reversal; deciding while no enabled room is calling or running does not. Always false with no sensor wired and no floor tripped. See [Safety priority](#safety-priority). |
 | `mode_by_floor`, room `floor_state`, `floor_reason`, `floor_want`, `floor_low`, `floor_high` | `mode_by_floor` is true while a tripped freeze floor or overheat ceiling's direction is the shared mode. Each room's `floor_state` is `none`, `enabled`, `armed`, `heat`/`cool` (running), `held` (waiting, or the head rejecting the command), `blind` (cannot protect: no reading, head unavailable, stalled), or `yielded`, and `floor_reason` says why. Always false and `none` with no floor set. See [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling). |
