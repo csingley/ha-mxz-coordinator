@@ -4440,7 +4440,7 @@ def _start_points(
 ) -> dict[str, Any]:
     """One room's start points: the edges its engage and demand calls compare to.
 
-    ``common``, ``sides`` and ``demand_bands`` are exactly what this compute
+    ``common``, ``sides``, and ``demand_bands`` are exactly what this compute
     passed to room_call / engage_with_latch, and :func:`call_edges` is the one
     place those turn into edges, so the numbers shown are the numbers used.
     The start edges are where a coasting room starts a run (a running room
