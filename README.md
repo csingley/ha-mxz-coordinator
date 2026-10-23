@@ -63,7 +63,7 @@ Use [Reconfigure](#reconfigure-heads-rooms-and-sensors) to change the room list 
 
 - [What it does](#what-it-does), and
   [the problem it solves](#the-problem-stock-auto-starves-rooms)
-- [What's new in 3.8.0](#whats-new-in-380)
+- [What's new in 3.9.0](#whats-new-in-390)
 - [Before you install](#before-you-install) · [Install](#install)
 - [Set up your outdoor unit](#set-up-your-outdoor-unit) ·
   [If setup stops or warns](#if-setup-stops-or-warns)
@@ -149,19 +149,64 @@ supported hardware and setup apply. It is not tested for parity with this integr
 
 </details>
 
-## What's new in 3.8.0
+## What's new in 3.9.0
 
 Released October 22, 2026.
+
+- **Per-room uneven drift.** Each room's page in Configure → Rooms → (room) has a new,
+  collapsed **Uneven drift** section with that room's own **Let it get cooler by** and
+  **Let it get warmer by**: the Comfort settings of the same name, for one room. Each
+  takes 0.5–5 °F / 0.25–2.5 °C. Both are blank by default, so nothing changes unless
+  you set one. For each side, MXZ uses the first of these that is set: the room's own
+  value, the room's drift number once you or an automation set it, Comfort's Let it get
+  cooler by or Let it get warmer by, then Allowed drift. A run still goes back to the
+  target. Each room's drift number still shows one value and gains read-only
+  `drift_heat` and `drift_cool` attributes, the drift in use on each side;
+  `drift_heat_from` and `drift_cool_from` read `room_cooler_by` or `room_warmer_by` for
+  a side set on the room's page, and `drift_source` reads `room`. There is no
+  migration. See [Per-room uneven drift](#per-room-uneven-drift) and
+  [Per-room uneven drift (3.9.0)](docs/MIGRATION.md#per-room-uneven-drift-390).
+- **Each room shows its start points.** The room's thermostat and its entry in the plan
+  sensor's `zones` list show `heat_start` and `cool_start` (where the room starts
+  heating or cooling while the outdoor unit is already in that mode),
+  `heat_demand_below` and `cool_demand_above` (where it asks the whole system to switch
+  to heating or cooling), and `drift_source`, `drift_heat_from`, and `drift_cool_from`
+  (where its drift comes from). They are read-only: the tile, Apple Home, Google Home,
+  and Alexa still see one target. They show the numbers MXZ is using now, so in eco
+  they show the eco band, Away low limit and Away high limit (for example 50 and 78),
+  not the comfort band around the target. See [Uneven drift](#uneven-drift) and
+  [Start points (3.9.0)](docs/MIGRATION.md#start-points-390).
+- **One target per room, stated plainly.** [CONTRIBUTING.md](CONTRIBUTING.md) now says
+  MXZ won't add a dual setpoint or a heat/cool range, even as an option: drift and
+  uneven drift already give each room an adjustable band around its one target. It also
+  names the power-user options and asks that a new tuning option be blank by default
+  and change nothing when unset.
+- **Oxford commas.** The remaining docs and the setup and Configure screen text now use
+  the Oxford comma.
+- **Hardware test: a room's own Let it get cooler by.** On our two-head MXZ (Home
+  Assistant 2026.10.2), with eco off, a bedroom at 63.86 °F with a 65 °F target stayed
+  idle with its own Let it get cooler by set to 2 (heat starts below 63.0) and 1.25
+  (below 63.75), and MXZ started heating it at once, with the head set to 65–67 °F,
+  when it was set to 1 (below 64.0). The other room, which has its own drift number,
+  didn't change. A global Let it get cooler by applied to the room that follows global
+  drift but not to the room with its own drift number, and a room's own value beat the
+  global one. With eco on, `heat_start` and `cool_start` read the eco band, 50 and 78;
+  with eco off, `heat_start` read the comfort values above. Clearing everything put the
+  stored settings back exactly as they were. Not tested on hardware: a room's Let it
+  get warmer by, the cool side, and a full run back to target (tests cover those). The
+  start points haven't been checked in Apple Home, Google Home, or Alexa.
+
+From 3.8.0:
 
 - **Let it get cooler by and Let it get warmer by.** Two optional settings in
   Configure → Comfort → Advanced let a room drift further one way than the other before
   a head starts: how far below target before heating starts, and how far above target
   before cooling starts. Each takes 0.5–5 °F / 0.25–2.5 °C. Both are blank by default,
   and a blank side uses Allowed drift, so nothing changes unless you set one. A room's
-  own drift number overrides both for that room. A run still goes back to the target.
-  There is no migration and no new entity; the plan sensor's `zones` list gains
-  `drift_heat` and `drift_cool`. The idea grew out of
-  [@csingley](https://github.com/csingley)'s dual-setpoint proposal
+  own drift number overrides both for that room (from 3.9.0, a room can also set either
+  side itself). A run still goes back to the target. There is no migration and no new
+  entity; the plan sensor's `zones` list gains `drift_heat` and `drift_cool`. The idea
+  grew out of [@csingley](https://github.com/csingley)'s dual-setpoint proposal
   ([#35](https://github.com/dkpnw/ha-mxz-coordinator/pull/35)). See
   [Uneven drift](#uneven-drift) and
   [Uneven drift (3.8.0)](docs/MIGRATION.md#uneven-drift-380).
@@ -181,64 +226,26 @@ Released October 22, 2026.
 
 From 3.7.1:
 
-- **The mode-change wait runs on a monotonic clock.** The wait between heat and cool
-  is now timed by a clock that only counts forward, not by the time of day. A jump
-  in the host's clock, from an NTP correction or a clock set by hand, can no longer
-  cut the wait short or stretch it. Time the host spends suspended doesn't count
-  toward the wait, so a wait under way when it suspends finishes after it resumes.
-  The wait's length and every setting are unchanged, and after a restart the full
-  wait applies, as before. By
+- **The mode-change wait, the coil-drying wait, and the floor's own timers run on a
+  monotonic clock**, so a jump in the host's clock can no longer end them early or hold
+  them late. The mode-change wait change is by
   [@csingley](https://github.com/csingley) in
   [#32](https://github.com/dkpnw/ha-mxz-coordinator/pull/32). See
-  [Mode-change wait on a monotonic clock (3.7.1)](docs/MIGRATION.md#mode-change-wait-on-a-monotonic-clock-371).
-- **The coil-drying wait and the floor's own timers run on the same clock.** Three more
-  waits now count on that monotonic clock: the coil-drying wait of Off after drying, a
-  freeze floor or overheat ceiling's two hours of driving before it stalls, and the
-  limit of one floor notice per room per hour. A clock jump can no longer end any of
-  them early or hold it late, and time the host spends suspended doesn't count toward
-  them. So a clock that jumps forward at boot (a host without a battery clock) no
-  longer makes a running floor look stalled, and after a suspend a floor stall or a
-  held-back floor notice can come later by the clock on the wall. No setting changes, and each behaves as before across a restart. A floor's
-  re-arm after a person takes the head back stays on the time of day, because it is
-  saved across a restart and shown as a time. These follow-on changes were made for
-  this release on the pattern of #32; they are not part of #32. See
+  [Mode-change wait on a monotonic clock (3.7.1)](docs/MIGRATION.md#mode-change-wait-on-a-monotonic-clock-371)
+  and
   [Coil-drying wait and floor timers on a monotonic clock (3.7.1)](docs/MIGRATION.md#coil-drying-wait-and-floor-timers-on-a-monotonic-clock-371).
-- **Hardware test: restart continuity only.** On our two-head MXZ (Home Assistant
-  2026.10.2), each upgrade restart left every target, room enable, fan choice, and the
-  plan unchanged. MXZ sent no command to a head at startup, and the full 600 s
-  mode-change wait applied after the restart. No coil-drying cycle, clock jump, or
-  suspend was tested on hardware; tests cover those.
 
 From 3.7.0:
 
-- **Safety priority.** A new, optional per-room setting in Configure → Rooms → (room):
-  a binary sensor. While it reads `on`, that room's own heat or cool want outranks
-  every other room's, including an enabled room that is calling or still running to
-  its target. It only raises a want the room already has; it never starts heat or cool
-  by itself, so it is not freeze protection. Designed and written by
+- **Safety priority**, designed and written by
   [@csingley](https://github.com/csingley) in
-  [#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31). See
-  [Safety priority](#safety-priority).
-- **Freeze floor and overheat ceiling.** Two new, optional per-room numbers in
-  Configure → Rooms → (room), empty by default. While a room is disabled, MXZ heats it
-  below its floor and cools it above its ceiling, then turns the head off again. A
-  tripped freeze floor outranks every other want in any room order, a Safety priority
-  room's cool included; a ceiling against a Safety priority room goes by room order. It never acts on a lost or stale
-  sensor, ends a run that makes no progress in 2 hours of running, never writes the
-  fan, and never touches anything but that room's own head. It builds on the safety
-  priority tier above. See
-  [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling).
-- **Upgrading changes nothing.** Both settings are unset for every room, including
-  every room of an existing install, and a room without them behaves exactly as in
-  3.6.0. There is no migration. See
-  [Safety priority (3.7.0)](docs/MIGRATION.md#safety-priority-370) and
+  [#31](https://github.com/dkpnw/ha-mxz-coordinator/pull/31), and the **freeze floor
+  and overheat ceiling**: optional per-room settings in Configure → Rooms → (room),
+  unset for every room until you set them. At release, only the freeze floor had been
+  tested on hardware. See [Safety priority](#safety-priority),
+  [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling),
+  [Safety priority (3.7.0)](docs/MIGRATION.md#safety-priority-370), and
   [Freeze floor and overheat ceiling (3.7.0)](docs/MIGRATION.md#freeze-floor-and-overheat-ceiling-370).
-- **Hardware test: the freeze floor only.** On my own two-head MXZ (ESPHome CN105,
-  Home Assistant 2026.10.2), upgraded in place from 3.5.0, a disabled room under a
-  65 °F floor tripped at 64.76 °F, heated with one command to its own head and nothing
-  else, cleared at 68.0 °F after 44 minutes, and went off, with no other writes. Safety
-  priority, the overheat ceiling, a room run from its own remote, and the Home Assistant
-  notification fallback have not been tested on hardware.
 
 From 3.6.0:
 
@@ -533,7 +540,7 @@ on a menu of six pages. Some settings sit in a collapsed section on their page.
 | **Seasons** | Weather source, Lock out heat when the high is at least, Lock out cool when the high is at most. Collapsed **Safety overrides**: Heat anyway below, Cool anyway above | Weather/outdoor-temperature input and seasonal heat/cool lockouts, with the heat-anyway and cool-anyway limits. |
 | **Away and setpoint limits** | Away low limit, Away high limit. Collapsed **Head setpoint range**: Lowest setpoint, Highest setpoint | **Away low / high limit**: protection thresholds used by eco and the default standby hold. Keep the equipment's own safeguards. **Lowest / Highest setpoint**: the head's allowed range. Commands are also bounded by usable head limits. |
 | **Standby hold** | Hold signal, Active state, During a hold | An external signal that holds enabled coordination in `eco`, `off`, or `fan_only`. Missing/unknown/unavailable input releases the hold. |
-| **Rooms** | A submenu with one page per room, in priority order, titled by the room's name: Airflow sensor, Vertical vane, Horizontal vane. Collapsed **Uneven drift**: Let it get cooler by, Let it get warmer by. Collapsed **Sensor freshness**: the six freshness fields | **Room vanes and airflow sensor**: correct detection, select another entity, or clear a field to remove that optional wiring. **Uneven drift**: optional, this room's own sides; see [Per-room uneven drift](#per-room-uneven-drift). **Sensor freshness**: see [Choose a sensor freshness contract](#choose-a-sensor-freshness-contract). |
+| **Rooms** | A submenu with one page per room, in priority order, titled by the room's name: Airflow sensor, Vertical vane, Horizontal vane, Safety priority sensor, Let its own remote run it while disabled. Collapsed **Uneven drift**: Let it get cooler by, Let it get warmer by. Collapsed **Sensor freshness**: the six freshness fields. Collapsed **Freeze floor and overheat ceiling**: Freeze floor, Overheat ceiling | **Room vanes and airflow sensor**: correct detection, select another entity, or clear a field to remove that optional wiring. **Safety priority sensor**: see [Safety priority](#safety-priority). **Let its own remote run it while disabled**: off by default; see [Run one room from its own remote](#run-one-room-from-its-own-remote). **Uneven drift**: optional, this room's own sides; see [Per-room uneven drift](#per-room-uneven-drift). **Sensor freshness**: see [Choose a sensor freshness contract](#choose-a-sensor-freshness-contract). **Freeze floor and overheat ceiling**: optional, empty by default; see [Freeze floor and overheat ceiling](#freeze-floor-and-overheat-ceiling). |
 
 **How saving works**
 

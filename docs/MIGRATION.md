@@ -1,5 +1,52 @@
 # Upgrading and migrating MXZ Coordinator
 
+## Per-room uneven drift (3.9.0)
+
+Each room's page in Configure → Rooms gains an optional, collapsed **Uneven drift**
+section with its own **Let it get cooler by** and **Let it get warmer by**, stored in
+that room's record as `drift_cooler_by` and `drift_warmer_by` only when set; emptying
+one removes its key.
+
+**Nothing to do.** No config-entry version change and no migration. A room without the
+keys, which is every room saved before this setting existed, behaves exactly as before.
+
+Per side, the room's own value wins, then the room's drift number once someone set it,
+then Comfort's **Let it get cooler by** or **Let it get warmer by**, then Allowed drift.
+A room that follows global drift, or that **Follow global drift** handed back, has not
+set its drift number, even though the number shows Allowed drift.
+
+`drift_heat_from` and `drift_cool_from`, new in this release too (see
+[Start points (3.9.0)](#start-points-390)), read `room_cooler_by` or `room_warmer_by`
+for a side that comes from this section and `room` for one that comes from the drift
+number, and `drift_source` is `room` when either side comes from the room. Each room's drift number still shows one value, and
+gains read-only `drift_heat` and `drift_cool` attributes: the drift in use on each side.
+
+See [Per-room uneven drift](../README.md#per-room-uneven-drift).
+
+## Start points (3.9.0)
+
+Each room's plan and thermostat show its start points: `heat_start`, `cool_start`,
+`heat_demand_below`, and `cool_demand_above`, with where their drift comes from in
+`drift_source`, `drift_heat_from`, and `drift_cool_from`, plus `start_points_mode`
+(`comfort` or `eco`) and `start_points_lockouts` (the lockouts in use: `heat`, `cool`,
+both, or none). They
+are in each room's entry in the plan sensor's `zones` list and on the room's
+thermostat.
+
+**Nothing to do.** Nothing is stored and nothing is migrated. They are read-only: the
+tile, Apple Home, Google Home, and Alexa still see one target.
+
+`heat_start` and `cool_start` are where the room starts heating or cooling while the
+outdoor unit is already in that mode. `heat_demand_below` and `cool_demand_above` are
+where the room asks the whole system to switch. They show the numbers MXZ is using
+now. In eco, they show the eco band, **Away low limit** and **Away high limit** (for
+example 50 and 78), not the comfort band around the target; turn eco off to see that.
+A heat or cool lockout moves its side out to **Heat anyway below** or **Cool anyway
+above**. A disabled room shows no start points: the four edges and `start_points_mode`
+are `null`, and `start_points_lockouts` is empty.
+
+See [Uneven drift](../README.md#uneven-drift).
+
 ## Uneven drift (3.8.0)
 
 Two optional settings in Configure → Comfort → Advanced: **Let it get cooler by** and
@@ -10,6 +57,8 @@ set; emptying one removes its key.
 the keys, which is every entry saved before this setting existed, uses Allowed drift on
 both sides, exactly as before. Each room's drift number and **Follow global drift** keep
 their meaning; a room's own drift still applies the same distance either way.
+3.9.0 adds a per-room value for each side; see
+[Per-room uneven drift (3.9.0)](#per-room-uneven-drift-390).
 
 The plan sensor's `zones` list gains `drift_heat` and `drift_cool` per room: the drift
 in use below and above target. Without the new settings both equal `drift`.
